@@ -7,7 +7,7 @@ import time
 
 st.set_page_config(page_title="AI 團體諮商模擬器", page_icon="🎭", layout="wide")
 
-# --- 側邊欄 (已移除研究者後台) ---
+# --- 側邊欄 ---
 with st.sidebar:
     st.markdown("### ℹ️ 說明")
     st.info("本系統對話紀錄將自動存入雲端資料庫，作為教學與研究分析使用。")
@@ -29,7 +29,6 @@ if "current_session_id" not in st.session_state:
     with col2:
         st.markdown("### ⚙️ 劇本設定")
         
-        # 1. 擴充團體類型
         group_type_options = [
             "大學生生涯探索團體",
             "人際關係成長團體",
@@ -73,17 +72,23 @@ if "current_session_id" not in st.session_state:
                 "atmosphere": context_input
             }
             
-            # 生成成員
+            # 生成成員與設定開場
             if user_role == "團體帶領者 (Leader)":
                 st.session_state.participants = personas.get_mixed_participants(count=5, include_leader=False)
                 st.session_state.user_avatar = "🧑‍🏫"
                 st.session_state.user_name = "Leader"
+                st.session_state.chat_history = [] # 帶領者需自行開場
             else:
                 st.session_state.participants = personas.get_mixed_participants(count=5, include_leader=True)
                 st.session_state.user_avatar = "🙋"
                 st.session_state.user_name = "Member"
+                
+                # 🌟 新增：如果是成員模式，Dr. AI 自動開場
+                welcome_msg = f"大家好，歡迎大家來到這次的「{final_group_type}」。今天是我們的第 {session_num} 次聚會，有人想先分享一下最近的心情，或是帶著什麼期待來嗎？"
+                st.session_state.chat_history = [{"role": "Dr. AI (Leader)", "content": welcome_msg}]
+                # 寫入後台紀錄
+                data_manager.log_message(session_id, student_id, "Dr. AI (Leader)", welcome_msg)
             
-            st.session_state.chat_history = []
             st.rerun()
         else:
             st.warning("請完整輸入學號、API Key 與團體資訊")
@@ -124,8 +129,10 @@ else:
         llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash", 
             google_api_key=st.session_state.api_key,
-            temperature=0.7
+            temperature=0
         )
+        
+        error_shown = False
         
         for participant in st.session_state.participants:
             with st.spinner(f"{participant['name']} ..."):
@@ -152,16 +159,6 @@ else:
                         prefix = "You" if role == participant['name'] else role
                         messages.append(HumanMessage(content=f"{prefix}: {content}"))
                 
-                # ... (上面是 llm = ChatGoogleGenerativeAI... 的設定) ...
-        
-        error_shown = False  # 👈 1. 加在 for 迴圈的上一行
-        
-        for participant in st.session_state.participants:
-            with st.spinner(f"{participant['name']} ..."):
-                
-                # ... (中間組裝 messages 的程式碼，請保留原本的不要動) ...
-                
-                # 👇 從這裡開始覆蓋您剛剛貼的那段
                 try:
                     response = llm.invoke(messages)
                     content = response.content
@@ -170,10 +167,9 @@ else:
                         st.session_state.chat_history.append({"role": participant['name'], "content": content})
                         data_manager.log_message(st.session_state.current_session_id, st.session_state.student_id, participant['name'], content)
                     
-                    time.sleep(1.5) # 👈 強制讓程式休息 1.5 秒
+                    time.sleep(1.5)
                     
                 except Exception as e:
                     if not error_shown and ("429" in str(e) or "quota" in str(e).lower() or "exhausted" in str(e).lower()):
                         st.warning("⏳ 系統提示：發言太踴躍啦！為了維持連線品質，請稍等約 30 秒後再發言喔。")
                         error_shown = True
-                # 👆 覆蓋到這裡結束
