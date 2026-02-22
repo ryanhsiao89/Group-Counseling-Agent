@@ -1,11 +1,14 @@
 import streamlit as st
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import uuid
 
 # Google Sheet 的名稱 (必須跟您雲端硬碟裡的檔名一模一樣)
 SHEET_NAME = "AI_Group_Counseling_Data"
+
+# 🌍 設定台灣時區 (UTC+8)
+TAIWAN_TZ = timezone(timedelta(hours=8))
 
 def get_sheet_connection():
     """建立 Google Sheets 連線"""
@@ -28,7 +31,8 @@ def get_sheet_connection():
 def start_session(student_id, role, group_type, session_num):
     """學生開始使用，紀錄 Session"""
     session_id = str(uuid.uuid4())
-    start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # 🕒 取得加上台灣時區的現在時間
+    start_time = datetime.now(TAIWAN_TZ).strftime("%Y-%m-%d %H:%M:%S")
     
     sheet = get_sheet_connection()
     if sheet:
@@ -43,7 +47,8 @@ def start_session(student_id, role, group_type, session_num):
 
 def log_message(session_id, student_id, speaker, message):
     """紀錄每一句對話到 ChatLogs 分頁"""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # 🕒 取得加上台灣時區的現在時間
+    timestamp = datetime.now(TAIWAN_TZ).strftime("%Y-%m-%d %H:%M:%S")
     
     sheet = get_sheet_connection()
     if sheet:
