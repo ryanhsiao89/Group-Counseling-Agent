@@ -142,7 +142,7 @@ else:
         st.session_state.chat_history.append({"role": "user", "content": user_input})
         data_manager.log_message(st.session_state.current_session_id, st.session_state.student_id, "User", user_input)
 
-        # 2. AI 回應 (使用 Gemini 2.5-flash，並設定 temperature=0 確保穩定性)
+        # 2. AI 回應 (依據您之前要求的 temperature=0 設定)
         llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash", 
             google_api_key=st.session_state.api_key,
@@ -152,7 +152,7 @@ else:
         error_shown = False
         
         for participant in st.session_state.participants:
-            with st.spinner(f"{participant['name']} ..."):
+            with st.spinner(f"{participant['name']} 思考中..."):
                 context_prompt = f"""
                 [DYNAMIC CONTEXT]
                 Group Type: {ctx['type']}
@@ -184,7 +184,8 @@ else:
                         st.session_state.chat_history.append({"role": participant['name'], "content": content})
                         data_manager.log_message(st.session_state.current_session_id, st.session_state.student_id, participant['name'], content)
                     
-                    time.sleep(1.5)
+                    # 🐢 慢動作關鍵：將原本的 1.5 秒改為 4 秒，騙過 Google 的次數限制
+                    time.sleep(4)
                     
                 except Exception as e:
                     if not error_shown and ("429" in str(e) or "quota" in str(e).lower() or "exhausted" in str(e).lower()):
