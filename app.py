@@ -72,17 +72,23 @@ if "current_session_id" not in st.session_state:
                 "atmosphere": context_input
             }
             
-            # 生成成員
+            # 生成成員與設定開場
             if user_role == "團體帶領者 (Leader)":
                 st.session_state.participants = personas.get_mixed_participants(count=5, include_leader=False)
                 st.session_state.user_avatar = "🧑‍🏫"
                 st.session_state.user_name = "Leader"
+                st.session_state.chat_history = [] # 帶領者需自行開場
             else:
                 st.session_state.participants = personas.get_mixed_participants(count=5, include_leader=True)
                 st.session_state.user_avatar = "🙋"
                 st.session_state.user_name = "Member"
+                
+                # 🌟 新增：如果是成員模式，Dr. AI 自動開場
+                welcome_msg = f"大家好，歡迎大家來到這次的「{final_group_type}」。今天是我們的第 {session_num} 次聚會，有人想先分享一下最近的心情，或是帶著什麼期待來嗎？"
+                st.session_state.chat_history = [{"role": "Dr. AI (Leader)", "content": welcome_msg}]
+                # 寫入後台紀錄
+                data_manager.log_message(session_id, student_id, "Dr. AI (Leader)", welcome_msg)
             
-            st.session_state.chat_history = []
             st.rerun()
         else:
             st.warning("請完整輸入學號、API Key 與團體資訊")
