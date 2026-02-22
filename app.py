@@ -3,6 +3,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage
 import personas
 import data_manager
+import time
 
 st.set_page_config(page_title="AI 團體諮商模擬器", page_icon="🎭", layout="wide")
 
@@ -151,6 +152,16 @@ else:
                         prefix = "You" if role == participant['name'] else role
                         messages.append(HumanMessage(content=f"{prefix}: {content}"))
                 
+                # ... (上面是 llm = ChatGoogleGenerativeAI... 的設定) ...
+        
+        error_shown = False  # 👈 1. 加在 for 迴圈的上一行
+        
+        for participant in st.session_state.participants:
+            with st.spinner(f"{participant['name']} ..."):
+                
+                # ... (中間組裝 messages 的程式碼，請保留原本的不要動) ...
+                
+                # 👇 從這裡開始覆蓋您剛剛貼的那段
                 try:
                     response = llm.invoke(messages)
                     content = response.content
@@ -158,5 +169,11 @@ else:
                         st.chat_message("assistant", avatar=participant['avatar']).write(f"**{participant['name']}:** {content}")
                         st.session_state.chat_history.append({"role": participant['name'], "content": content})
                         data_manager.log_message(st.session_state.current_session_id, st.session_state.student_id, participant['name'], content)
-                except Exception:
-                    pass
+                    
+                    time.sleep(1.5) # 👈 強制讓程式休息 1.5 秒
+                    
+                except Exception as e:
+                    if not error_shown and ("429" in str(e) or "quota" in str(e).lower() or "exhausted" in str(e).lower()):
+                        st.warning("⏳ 系統提示：發言太踴躍啦！為了維持連線品質，請稍等約 30 秒後再發言喔。")
+                        error_shown = True
+                # 👆 覆蓋到這裡結束
