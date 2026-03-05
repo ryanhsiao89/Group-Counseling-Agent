@@ -5,8 +5,57 @@ import personas
 import data_manager
 import time
 import random
+import smtplib
+from email.mime.text import MIMEText
 
 st.set_page_config(page_title="AI 團體諮商模擬器", page_icon="🎭", layout="wide")
+
+# --- 🌟 本研究專屬白名單 (Whitelist) ---
+WHITELIST = {
+    'BB1112067': 'bb1112067@hcu.edu.tw',
+    'BB1122013': 'bb1122013@hcu.edu.tw',
+    'BB1122034': 'bb1122034@hcu.edu.tw',
+    'BB1122053': 'bb1122053@hcu.edu.tw',
+    'BB1125034': 'bb1125034@hcu.edu.tw',
+    'GB1132002': 'gb1132002@hcu.edu.tw',
+    'GB1142006': 'gb1142006@hcu.edu.tw',
+    'KA1140202': 'ka1140202@hcu.edu.tw',
+    'KA1140223': 'ka1140223@hcu.edu.tw',
+    'KA1140225': 'ka1140225@hcu.edu.tw',
+    'KA1140229': 'ka1140229@hcu.edu.tw',
+    'KB1140202': 'kb1140202@hcu.edu.tw',
+    'MB1132018': 'mb1132018@hcu.edu.tw',
+    'MB1142005': 'mb1142005@hcu.edu.tw',
+    'MB1142008': 'mb1142008@hcu.edu.tw',
+    'MB1142123': 'mb1142123@hcu.edu.tw',
+    '112152516': 'ryanhsiao89@gmail.com',
+    'HOPE HARN': 'hopehopejoy@gmail.com'
+}
+
+# --- 寄送 OTP 驗證信模組 ---
+def send_otp_email(receiver_email, otp):
+    """透過 Gmail 發送 6 位數驗證碼"""
+    try:
+        sender_email = st.secrets["email"]["sender_email"]
+        app_password = st.secrets["email"]["app_password"]
+        
+        msg = MIMEText(f"您好：\n\n歡迎參與本研究並使用「團體諮商 AI 模擬演練系統」。\n\n您的本次登入驗證碼為：【 {otp} 】\n\n請將此驗證碼輸入系統以開始演練。\n若非您本人操作，請忽略此信件。", 'plain', 'utf-8')
+        msg['Subject'] = "團體諮商 AI 模擬系統 - 登入驗證碼"
+        msg['From'] = sender_email
+        msg['To'] = receiver_email
+        
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(sender_email, app_password)
+            server.send_message(msg)
+        return True
+    except Exception as e:
+        print(f"寄信失敗: {e}")
+        return False
+
+# --- 初始化 Session State ---
+if "otp_verified" not in st.session_state: st.session_state.otp_verified = False
+if "generated_otp" not in st.session_state: st.session_state.generated_otp = None
+if "student_id" not in st.session_state: st.session_state.student_id = ""
 
 # --- 側邊欄 ---
 with st.sidebar:
@@ -14,15 +63,58 @@ with st.sidebar:
     st.info("本系統對話紀錄將自動存入雲端資料庫，作為教學與研究分析使用。")
     st.caption("請盡情演練，無需擔心紀錄遺失。")
 
-# --- 登入與設定 ---
-if "current_session_id" not in st.session_state:
+# --- 階段 1：登入與雙重驗證 (OTP) ---
+if not st.session_state.otp_verified:
+    st.title("🛡️ 團體諮商 AI 模擬系統")
+    st.info("本系統為專屬演練平台。為確保研究資料正確性，請先進行身分驗證。")
+    
+    st.markdown("### 🧑‍🤝‍🧑 步驟一：輸入學號獲取驗證碼")
+    student_id_input = st.text_input("請輸入您的學號/ID：", placeholder="例如：BB1112067")
+    
+    if st.button("📧 發送驗證碼"):
+        if not student_id_input.strip():
+            st.error("❌ 學號/ID 不能為空！")
+        else:
+            # 將輸入轉大寫，確保對應白名單
+            student_id_clean = student_id_input.strip().upper() 
+            # 特別處理可能有小寫或空白的 ID
+            if student_id_input.strip() in WHITELIST:
+                student_id_clean = student_id_input.strip()
+                
+            if student_id_clean not in WHITELIST:
+                st.error("❌ 查無此學號/ID，請確認您是否具備本研究之參與資格。")
+            else:
+                target_email = WHITELIST[student_id_clean]
+                masked_email = target_email[:4] + "****" + target_email[target_email.find("@"):]
+                
+                with st.spinner("正在發送驗證信，請稍候..."):
+                    otp = str(random.randint(100000, 999999))
+                    if send_otp_email(target_email, otp):
+                        st.session_state.generated_otp = otp
+                        st.session_state.student_id = student_id_clean
+                        st.success(f"✅ 驗證碼已發送至您的專屬信箱 ({masked_email})！請檢查收件匣（若無請檢查垃圾郵件）。")
+                    else:
+                        st.error("❌ 寄信失敗，請向研究者確認系統後台信箱設定。")
+    
+    if st.session_state.generated_otp:
+        st.markdown("### 🔐 步驟二：輸入驗證碼")
+        user_otp = st.text_input("請輸入您信箱收到的 6 位數驗證碼：", type="password")
+        if st.button("🚀 驗證並前往劇本設定"):
+            if user_otp == st.session_state.generated_otp:
+                st.session_state.otp_verified = True
+                st.rerun()
+            else:
+                st.error("❌ 驗證碼錯誤，請重新輸入。")
+
+# --- 階段 2：劇本與參數設定 ---
+elif "current_session_id" not in st.session_state:
     st.title("🎭 團體諮商模擬系統")
-    st.markdown("##### 請輸入資訊以開始您的演練")
+    st.markdown(f"##### 👤 歡迎，**{st.session_state.student_id}**！請完成演練設定")
     
     col1, col2 = st.columns(2)
     
     with col1:
-        student_id = st.text_input("學號 (Student ID)", placeholder="S112001")
+        st.markdown("### 🔑 系統設定")
         api_key_input = st.text_input("Google API Key", type="password")
         user_role = st.radio("👉 您的角色", 
                              ["團體帶領者 (Leader)", "團體成員 (Member)"])
@@ -31,14 +123,9 @@ if "current_session_id" not in st.session_state:
         st.markdown("### ⚙️ 劇本設定")
         
         group_type_options = [
-            "大學生生涯探索團體",
-            "人際關係成長團體",
-            "情緒支持團體",
-            "壓力調適與自我照顧團體", 
-            "憤怒情緒管理團體",       
-            "哀傷與失落輔導團體",     
-            "職場/學校溝通技巧團體",
-            "其他 (請自訂)"
+            "大學生生涯探索團體", "人際關係成長團體", "情緒支持團體",
+            "壓力調適與自我照顧團體", "憤怒情緒管理團體", "哀傷與失落輔導團體",     
+            "職場/學校溝通技巧團體", "其他 (請自訂)"
         ]
         
         selected_type = st.selectbox("團體類型", group_type_options)
@@ -59,9 +146,8 @@ if "current_session_id" not in st.session_state:
         )
 
     if st.button("開始演練", type="primary"):
-        if student_id and api_key_input and final_group_type:
+        if api_key_input and final_group_type:
             
-            # 🎲 隨機情境生成邏輯 (新手安全村版本)
             if context_input.strip() == "":
                 random_contexts = [
                     "【溫和破冰】這是第一次團體，成員們態度都很友善，但稍微有些害羞。大家面帶微笑看著帶領者，等待您給予明確的指示或有趣的破冰小活動。",
@@ -75,16 +161,15 @@ if "current_session_id" not in st.session_state:
                 final_context = context_input
 
             # 啟動並寫入 Google Sheet
-            session_id = data_manager.start_session(student_id, user_role, final_group_type, session_num)
+            session_id = data_manager.start_session(st.session_state.student_id, user_role, final_group_type, session_num)
             
             st.session_state.current_session_id = session_id
-            st.session_state.student_id = student_id
             st.session_state.api_key = api_key_input
             st.session_state.user_role = user_role
             st.session_state.group_context = {
                 "type": final_group_type, 
                 "session": session_num, 
-                "atmosphere": final_context  # 寫入最終決定的情境
+                "atmosphere": final_context 
             }
             
             # 生成成員與設定開場
@@ -98,21 +183,19 @@ if "current_session_id" not in st.session_state:
                 st.session_state.user_avatar = "🙋"
                 st.session_state.user_name = "Member"
                 
-                # Dr. AI 自動開場
                 welcome_msg = f"大家好，歡迎大家來到這次的「{final_group_type}」。今天是我們的第 {session_num} 次聚會，有人想先分享一下最近的心情，或是帶著什麼期待來嗎？"
                 st.session_state.chat_history = [{"role": "Dr. AI (Leader)", "content": welcome_msg}]
-                data_manager.log_message(session_id, student_id, "Dr. AI (Leader)", welcome_msg)
+                data_manager.log_message(session_id, st.session_state.student_id, "Dr. AI (Leader)", welcome_msg)
             
             st.rerun()
         else:
-            st.warning("請完整輸入學號、API Key 與團體資訊")
+            st.warning("請輸入 API Key 並確認團體資訊")
 
+# --- 階段 3：聊天室 ---
 else:
-    # --- 聊天室 ---
     ctx = st.session_state.group_context
     st.subheader(f"💬 {ctx['type']} (第 {ctx['session']} 次)")
     
-    # 🎬 顯示當前劇本情境給使用者看
     st.success(f"🎬 **當前情境設定：** {ctx['atmosphere']}")
     
     cols = st.columns(len(st.session_state.participants))
@@ -137,12 +220,10 @@ else:
         
     # 輸入框
     if user_input := st.chat_input("請輸入..."):
-        # 1. 紀錄使用者發言
         st.chat_message("user", avatar=st.session_state.user_avatar).write(user_input)
         st.session_state.chat_history.append({"role": "user", "content": user_input})
         data_manager.log_message(st.session_state.current_session_id, st.session_state.student_id, "User", user_input)
 
-        # 2. AI 回應 (依據您之前要求的 temperature=0 設定)
         llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash", 
             google_api_key=st.session_state.api_key,
@@ -184,7 +265,6 @@ else:
                         st.session_state.chat_history.append({"role": participant['name'], "content": content})
                         data_manager.log_message(st.session_state.current_session_id, st.session_state.student_id, participant['name'], content)
                     
-                    # 🐢 慢動作關鍵：將原本的 1.5 秒改為 4 秒，騙過 Google 的次數限制
                     time.sleep(4)
                     
                 except Exception as e:
