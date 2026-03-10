@@ -12,24 +12,29 @@ st.set_page_config(page_title="AI 團體諮商模擬器", page_icon="🎭", layo
 
 # --- 🌟 本研究專屬白名單 (Whitelist) ---
 WHITELIST = {
-    'BB1112067': 'bb1112067@hcu.edu.tw',
-    'BB1122013': 'bb1122013@hcu.edu.tw',
+    'BB1092033': 'joychen0614@gmail.com',
+    'BB1102066': 'bb1102066@hcu.edu.tw',
+    'BB1122004': 'bb1122004@hcu.edu.tw',
+    'BB1122014': 'chienchiye@gmail.com',
+    'BB1122015': 'bb1122015@hcu.edu.tw',
+    'BB1122017': 'bb1122017@hcu.edu.tw',
+    'BB1122021': 'bb1122021@hcu.edu.tw',
+    'BB1122022': 'bb1122022@hcu.edu.tw',
+    'BB1122024': 'bb1122024@hcu.edu.tw',
+    'BB1122025': 'jason745726@gmail.com',
+    'BB1122026': '940104lin@gmail.com',
+    'BB1122028': 'bb1122028@hcu.edu.tw',
+    'BB1122032': 'a02577koy@gmail.com',
     'BB1122034': 'bb1122034@hcu.edu.tw',
-    'BB1122053': 'bb1122053@hcu.edu.tw',
+    'BB1122040': 'bb1122040@hcu.edu.tw',
+    'BB1122041': 'chenjay0116@gmail.com',
+    'BB1122053': 'jasminehu0711@gmail.com',
+    'BB1125025': 'bb1125025@hcu.edu.tw',
     'BB1125034': 'bb1125034@hcu.edu.tw',
-    'GB1132002': 'gb1132002@hcu.edu.tw',
-    'GB1142006': 'gb1142006@hcu.edu.tw',
-    'KA1140202': 'ka1140202@hcu.edu.tw',
-    'KA1140223': 'ka1140223@hcu.edu.tw',
-    'KA1140225': 'ka1140225@hcu.edu.tw',
-    'KA1140229': 'ka1140229@hcu.edu.tw',
-    'KB1140202': 'kb1140202@hcu.edu.tw',
-    'MB1132018': 'mb1132018@hcu.edu.tw',
-    'MB1142005': 'mb1142005@hcu.edu.tw',
-    'MB1142008': 'mb1142008@hcu.edu.tw',
-    'MB1142123': 'mb1142123@hcu.edu.tw',
+    'TA1140202': 'ta1140202@hcu.edu.tw',
+    'TA1140203': 'ta1140203@hcu.edu.tw',
     '112152516': 'ryanhsiao89@gmail.com',
-    'HOPE HARN': 'hopehopejoy@gmail.com'
+    'HOPE HARN': 'hopehopejoy@gmail.com',
 }
 
 # --- 寄送 OTP 驗證信模組 ---
@@ -271,3 +276,4 @@ else:
                     if not error_shown and ("429" in str(e) or "quota" in str(e).lower() or "exhausted" in str(e).lower()):
                         st.warning("⏳ 系統提示：發言太踴躍啦！為了維持連線品質，請稍等約 30 秒後再發言喔。")
                         error_shown = True
+
