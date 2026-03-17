@@ -7,10 +7,11 @@ import time
 import random
 import smtplib
 from email.mime.text import MIMEText
+from datetime import datetime
 
 st.set_page_config(page_title="AI 團體諮商模擬器", page_icon="🎭", layout="wide")
 
-# --- 🌟 本研究專屬白名單 (Whitelist) - 來自最新上傳的 CSV 名單 ---
+# --- 🌟 本研究專屬白名單 (Whitelist) ---
 WHITELIST = {
     'BB1092033': 'joychen0614@gmail.com',
     'BB1102066': 'bb1102066@hcu.edu.tw',
@@ -45,7 +46,7 @@ def send_otp_email(receiver_email, otp):
         sender_email = st.secrets["email"]["sender_email"]
         app_password = st.secrets["email"]["app_password"]
         
-        msg = MIMEText(f"您好：\n\n歡迎參與並使用「團體諮商 AI 模擬演練系統」。\n\n您的本次登入驗證碼為：【 {otp} 】\n\n請將此驗證碼輸入系統以開始演練。\n若非您本人操作，請忽略此信件。", 'plain', 'utf-8')
+        msg = MIMEText(f"您好：\n\n歡迎參與本研究並使用「團體諮商 AI 模擬演練系統」。\n\n您的本次登入驗證碼為：【 {otp} 】\n\n請將此驗證碼輸入系統以開始演練。\n若非您本人操作，請忽略此信件。", 'plain', 'utf-8')
         msg['Subject'] = "團體諮商 AI 模擬系統 - 登入驗證碼"
         msg['From'] = sender_email
         msg['To'] = receiver_email
@@ -62,8 +63,9 @@ def send_otp_email(receiver_email, otp):
 if "otp_verified" not in st.session_state: st.session_state.otp_verified = False
 if "generated_otp" not in st.session_state: st.session_state.generated_otp = None
 if "student_id" not in st.session_state: st.session_state.student_id = ""
+if "chat_history" not in st.session_state: st.session_state.chat_history = []
 
-# --- 側邊欄 ---
+# --- 側邊欄 (基本說明) ---
 with st.sidebar:
     st.markdown("### ℹ️ 說明")
     st.info("本系統對話紀錄將自動存入雲端資料庫，作為教學與研究分析使用。")
@@ -75,20 +77,18 @@ if not st.session_state.otp_verified:
     st.info("本系統為專屬演練平台。為確保研究資料正確性，請先進行身分驗證。")
     
     st.markdown("### 🧑‍🤝‍🧑 步驟一：輸入學號獲取驗證碼")
-    student_id_input = st.text_input("請輸入您的學號/ID：", placeholder="例如：BB1122014")
+    student_id_input = st.text_input("請輸入您的學號/ID：", placeholder="例如：BB1112067")
     
     if st.button("📧 發送驗證碼"):
         if not student_id_input.strip():
             st.error("❌ 學號/ID 不能為空！")
         else:
-            # 將輸入轉大寫，確保對應白名單
             student_id_clean = student_id_input.strip().upper() 
-            # 特別處理可能有小寫或空白的 ID (如老師的 ID)
             if student_id_input.strip() in WHITELIST:
                 student_id_clean = student_id_input.strip()
                 
             if student_id_clean not in WHITELIST:
-                st.error("❌ 查無此學號/ID，請確認您是否具備本課程之參與資格。")
+                st.error("❌ 查無此學號/ID，請確認您是否具備本研究之參與資格。")
             else:
                 target_email = WHITELIST[student_id_clean]
                 masked_email = target_email[:4] + "****" + target_email[target_email.find("@"):]
@@ -166,7 +166,6 @@ elif "current_session_id" not in st.session_state:
             else:
                 final_context = context_input
 
-            # 啟動並寫入 Google Sheet
             session_id = data_manager.start_session(st.session_state.student_id, user_role, final_group_type, session_num)
             
             st.session_state.current_session_id = session_id
@@ -178,14 +177,23 @@ elif "current_session_id" not in st.session_state:
                 "atmosphere": final_context 
             }
             
-            # 生成成員與設定開場
+            # 確保達成「一 Leader + 三成員」的四選三出場機制
             if user_role == "團體帶領者 (Leader)":
-                st.session_state.participants = personas.get_mixed_participants(count=5, include_leader=False)
+                full_pool = personas.get_mixed_participants(count=5, include_leader=False)
+                members_only = [p for p in full_pool if "Leader" not in p['name']]
+                st.session_state.participants = random.sample(members_only, min(3, len(members_only)))
+                
                 st.session_state.user_avatar = "🧑‍🏫"
                 st.session_state.user_name = "Leader"
                 st.session_state.chat_history = [] 
             else:
-                st.session_state.participants = personas.get_mixed_participants(count=5, include_leader=True)
+                full_pool = personas.get_mixed_participants(count=5, include_leader=True)
+                ai_leader = [p for p in full_pool if "Leader" in p['name']]
+                members_only = [p for p in full_pool if "Leader" not in p['name']]
+                
+                selected_members = random.sample(members_only, min(3, len(members_only)))
+                st.session_state.participants = ai_leader + selected_members
+                
                 st.session_state.user_avatar = "🙋"
                 st.session_state.user_name = "Member"
                 
@@ -209,9 +217,33 @@ else:
         with cols[idx]:
             st.info(f"{p['avatar']} {p['name']}\n\n{p['type']}")
 
-    if st.sidebar.button("🚪 結束/登出"):
-        for key in list(st.session_state.keys()): del st.session_state[key]
-        st.rerun()
+    # ⏬ 新增：防呆 UX 側邊欄設計 (將下載與登出整合)
+    with st.sidebar:
+        st.markdown("---")
+        st.markdown("### 📝 演練結束區")
+        
+        # 準備逐字稿內容
+        transcript = f"【團體諮商模擬演練逐字稿】\n學號：{st.session_state.student_id}\n匯出時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        for msg in st.session_state.chat_history:
+            transcript += f"{msg['role']}： {msg['content']}\n\n"
+            
+        # 按鈕 1：醒目的下載按鈕 (type="primary")
+        st.download_button(
+            label="📥 1. 先下載本次逐字稿",
+            data=transcript,
+            file_name=f"GroupLog_{st.session_state.student_id}_{datetime.now().strftime('%m%d_%H%M')}.txt",
+            mime="text/plain",
+            use_container_width=True,
+            type="primary"
+        )
+        
+        # 加上防呆警告
+        st.warning("⚠️ 離開前請務必確認已下載逐字稿。")
+        
+        # 按鈕 2：登出按鈕
+        if st.button("🚪 2. 結束並登出系統", use_container_width=True):
+            for key in list(st.session_state.keys()): del st.session_state[key]
+            st.rerun()
 
     # 顯示訊息
     for msg in st.session_state.chat_history:
@@ -233,12 +265,28 @@ else:
         llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash", 
             google_api_key=st.session_state.api_key,
-            temperature=0  # 確保模型輸出的穩定性
+            temperature=0
         )
         
         error_shown = False
         
-        for participant in st.session_state.participants:
+        # ⏬ 動態發言機制 (降低 API 負荷)
+        active_speakers = []
+        for p in st.session_state.participants:
+            if "Leader" in p['name']:
+                if random.random() < 0.80:
+                    active_speakers.append(p)
+            else:
+                if random.random() < 0.40:
+                    active_speakers.append(p)
+                    
+        # 防冷場機制
+        if not active_speakers:
+            active_speakers = [random.choice(st.session_state.participants)]
+            
+        random.shuffle(active_speakers)
+        
+        for participant in active_speakers:
             with st.spinner(f"{participant['name']} 思考中..."):
                 context_prompt = f"""
                 [DYNAMIC CONTEXT]
@@ -249,8 +297,7 @@ else:
                 User Role: {st.session_state.user_role}
                 
                 INSTRUCTION: 
-                Respond naturally. If you are a quiet member, you can stay silent (return empty string).
-                If you are the AI Leader, help facilitate.
+                Respond naturally according to your persona.
                 """
                 
                 messages = [SystemMessage(content=context_prompt)]
@@ -271,10 +318,9 @@ else:
                         st.session_state.chat_history.append({"role": participant['name'], "content": content})
                         data_manager.log_message(st.session_state.current_session_id, st.session_state.student_id, participant['name'], content)
                     
-                    # 避免 API 限流的慢動作保護機制
-                    time.sleep(4)
+                    time.sleep(2.5)
                     
                 except Exception as e:
                     if not error_shown and ("429" in str(e) or "quota" in str(e).lower() or "exhausted" in str(e).lower()):
-                        st.warning("⏳ 系統提示：發言太踴躍啦！為了維持連線品質，請稍等約 30 秒後再發言喔。")
+                        st.warning("⏳ 系統提示：伺服器稍微有點塞車，請稍等約 20 秒後再發言。")
                         error_shown = True
