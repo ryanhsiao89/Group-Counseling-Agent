@@ -65,28 +65,11 @@ if "generated_otp" not in st.session_state: st.session_state.generated_otp = Non
 if "student_id" not in st.session_state: st.session_state.student_id = ""
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 
-# --- 側邊欄 ---
+# --- 側邊欄 (基本說明) ---
 with st.sidebar:
     st.markdown("### ℹ️ 說明")
     st.info("本系統對話紀錄將自動存入雲端資料庫，作為教學與研究分析使用。")
     st.caption("請盡情演練，無需擔心紀錄遺失。")
-    
-    # 📥 下載當次逐字稿
-    if st.session_state.chat_history:
-        st.markdown("---")
-        st.markdown("### 📝 學習反思工具")
-        
-        transcript = f"【團體諮商模擬演練逐字稿】\n學號：{st.session_state.student_id}\n匯出時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-        for msg in st.session_state.chat_history:
-            transcript += f"{msg['role']}： {msg['content']}\n\n"
-            
-        st.download_button(
-            label="📥 下載本次演練逐字稿 (.txt)",
-            data=transcript,
-            file_name=f"GroupLog_{st.session_state.student_id}_{datetime.now().strftime('%m%d_%H%M')}.txt",
-            mime="text/plain",
-            use_container_width=True
-        )
 
 # --- 階段 1：登入與雙重驗證 (OTP) ---
 if not st.session_state.otp_verified:
@@ -194,11 +177,10 @@ elif "current_session_id" not in st.session_state:
                 "atmosphere": final_context 
             }
             
-            # ⏬ 終極修正：確保達成「一 Leader + 三成員」的四選三出場機制！
+            # 確保達成「一 Leader + 三成員」的四選三出場機制
             if user_role == "團體帶領者 (Leader)":
                 full_pool = personas.get_mixed_participants(count=5, include_leader=False)
                 members_only = [p for p in full_pool if "Leader" not in p['name']]
-                # 修正為 min(3, ...)，確保抽出 3 位成員
                 st.session_state.participants = random.sample(members_only, min(3, len(members_only)))
                 
                 st.session_state.user_avatar = "🧑‍🏫"
@@ -209,7 +191,6 @@ elif "current_session_id" not in st.session_state:
                 ai_leader = [p for p in full_pool if "Leader" in p['name']]
                 members_only = [p for p in full_pool if "Leader" not in p['name']]
                 
-                # 修正為 min(3, ...)，抽出 3 位 AI 成員，加上 AI Leader，畫面上就是 4 個角色
                 selected_members = random.sample(members_only, min(3, len(members_only)))
                 st.session_state.participants = ai_leader + selected_members
                 
@@ -236,9 +217,33 @@ else:
         with cols[idx]:
             st.info(f"{p['avatar']} {p['name']}\n\n{p['type']}")
 
-    if st.sidebar.button("🚪 結束/登出"):
-        for key in list(st.session_state.keys()): del st.session_state[key]
-        st.rerun()
+    # ⏬ 新增：防呆 UX 側邊欄設計 (將下載與登出整合)
+    with st.sidebar:
+        st.markdown("---")
+        st.markdown("### 📝 演練結束區")
+        
+        # 準備逐字稿內容
+        transcript = f"【團體諮商模擬演練逐字稿】\n學號：{st.session_state.student_id}\n匯出時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        for msg in st.session_state.chat_history:
+            transcript += f"{msg['role']}： {msg['content']}\n\n"
+            
+        # 按鈕 1：醒目的下載按鈕 (type="primary")
+        st.download_button(
+            label="📥 1. 先下載本次逐字稿",
+            data=transcript,
+            file_name=f"GroupLog_{st.session_state.student_id}_{datetime.now().strftime('%m%d_%H%M')}.txt",
+            mime="text/plain",
+            use_container_width=True,
+            type="primary"
+        )
+        
+        # 加上防呆警告
+        st.warning("⚠️ 離開前請務必確認已下載逐字稿。")
+        
+        # 按鈕 2：登出按鈕
+        if st.button("🚪 2. 結束並登出系統", use_container_width=True):
+            for key in list(st.session_state.keys()): del st.session_state[key]
+            st.rerun()
 
     # 顯示訊息
     for msg in st.session_state.chat_history:
