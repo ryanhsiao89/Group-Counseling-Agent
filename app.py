@@ -7,6 +7,7 @@ import time
 import random
 import smtplib
 from email.mime.text import MIMEText
+from datetime import datetime
 
 st.set_page_config(page_title="AI 團體諮商模擬器", page_icon="🎭", layout="wide")
 
@@ -62,12 +63,31 @@ def send_otp_email(receiver_email, otp):
 if "otp_verified" not in st.session_state: st.session_state.otp_verified = False
 if "generated_otp" not in st.session_state: st.session_state.generated_otp = None
 if "student_id" not in st.session_state: st.session_state.student_id = ""
+if "chat_history" not in st.session_state: st.session_state.chat_history = []
 
 # --- 側邊欄 ---
 with st.sidebar:
     st.markdown("### ℹ️ 說明")
     st.info("本系統對話紀錄將自動存入雲端資料庫，作為教學與研究分析使用。")
     st.caption("請盡情演練，無需擔心紀錄遺失。")
+    
+    # 📥 擴充功能一：下載當次逐字稿
+    if st.session_state.chat_history:
+        st.markdown("---")
+        st.markdown("### 📝 學習反思工具")
+        
+        # 將對話紀錄整理成純文字格式
+        transcript = f"【團體諮商模擬演練逐字稿】\n學號：{st.session_state.student_id}\n匯出時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        for msg in st.session_state.chat_history:
+            transcript += f"{msg['role']}： {msg['content']}\n\n"
+            
+        st.download_button(
+            label="📥 下載本次演練逐字稿 (.txt)",
+            data=transcript,
+            file_name=f"GroupLog_{st.session_state.student_id}_{datetime.now().strftime('%m%d_%H%M')}.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
 
 # --- 階段 1：登入與雙重驗證 (OTP) ---
 if not st.session_state.otp_verified:
@@ -81,9 +101,7 @@ if not st.session_state.otp_verified:
         if not student_id_input.strip():
             st.error("❌ 學號/ID 不能為空！")
         else:
-            # 將輸入轉大寫，確保對應白名單
             student_id_clean = student_id_input.strip().upper() 
-            # 特別處理可能有小寫或空白的 ID
             if student_id_input.strip() in WHITELIST:
                 student_id_clean = student_id_input.strip()
                 
@@ -178,14 +196,14 @@ elif "current_session_id" not in st.session_state:
                 "atmosphere": final_context 
             }
             
-            # 生成成員與設定開場
+            # ⏬ 擴充功能二（降低負荷）：生成人數由 5 降至 4 人
             if user_role == "團體帶領者 (Leader)":
-                st.session_state.participants = personas.get_mixed_participants(count=5, include_leader=False)
+                st.session_state.participants = personas.get_mixed_participants(count=4, include_leader=False)
                 st.session_state.user_avatar = "🧑‍🏫"
                 st.session_state.user_name = "Leader"
                 st.session_state.chat_history = [] 
             else:
-                st.session_state.participants = personas.get_mixed_participants(count=5, include_leader=True)
+                st.session_state.participants = personas.get_mixed_participants(count=4, include_leader=True)
                 st.session_state.user_avatar = "🙋"
                 st.session_state.user_name = "Member"
                 
@@ -231,50 +249,4 @@ else:
         data_manager.log_message(st.session_state.current_session_id, st.session_state.student_id, "User", user_input)
 
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash", 
-            google_api_key=st.session_state.api_key,
-            temperature=0
-        )
-        
-        error_shown = False
-        
-        for participant in st.session_state.participants:
-            with st.spinner(f"{participant['name']} 思考中..."):
-                context_prompt = f"""
-                [DYNAMIC CONTEXT]
-                Group Type: {ctx['type']}
-                Session Number: {ctx['session']}
-                Atmosphere: {ctx['atmosphere']}
-                Your Role: {participant['system_prompt']}
-                User Role: {st.session_state.user_role}
-                
-                INSTRUCTION: 
-                Respond naturally. If you are a quiet member, you can stay silent (return empty string).
-                If you are the AI Leader, help facilitate.
-                """
-                
-                messages = [SystemMessage(content=context_prompt)]
-                for history_msg in st.session_state.chat_history:
-                    role = history_msg["role"]
-                    content = history_msg["content"]
-                    if role == "user":
-                        messages.append(HumanMessage(content=f"User: {content}"))
-                    else:
-                        prefix = "You" if role == participant['name'] else role
-                        messages.append(HumanMessage(content=f"{prefix}: {content}"))
-                
-                try:
-                    response = llm.invoke(messages)
-                    content = response.content
-                    if len(content.strip()) > 1:
-                        st.chat_message("assistant", avatar=participant['avatar']).write(f"**{participant['name']}:** {content}")
-                        st.session_state.chat_history.append({"role": participant['name'], "content": content})
-                        data_manager.log_message(st.session_state.current_session_id, st.session_state.student_id, participant['name'], content)
-                    
-                    time.sleep(4)
-                    
-                except Exception as e:
-                    if not error_shown and ("429" in str(e) or "quota" in str(e).lower() or "exhausted" in str(e).lower()):
-                        st.warning("⏳ 系統提示：發言太踴躍啦！為了維持連線品質，請稍等約 30 秒後再發言喔。")
-                        error_shown = True
-
+            model="gemini-2.5-flash
