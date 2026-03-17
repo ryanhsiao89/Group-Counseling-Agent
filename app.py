@@ -71,7 +71,7 @@ with st.sidebar:
     st.info("本系統對話紀錄將自動存入雲端資料庫，作為教學與研究分析使用。")
     st.caption("請盡情演練，無需擔心紀錄遺失。")
     
-    # 📥 擴充功能一：下載當次逐字稿
+    # 📥 下載當次逐字稿
     if st.session_state.chat_history:
         st.markdown("---")
         st.markdown("### 📝 學習反思工具")
@@ -194,27 +194,23 @@ elif "current_session_id" not in st.session_state:
                 "atmosphere": final_context 
             }
             
-            # ⏬ 終極擴充：強制過濾名單，實現「四選三」隨機出場機制
+            # ⏬ 終極修正：確保達成「一 Leader + 三成員」的四選三出場機制！
             if user_role == "團體帶領者 (Leader)":
-                # 取得名單
                 full_pool = personas.get_mixed_participants(count=5, include_leader=False)
-                # 剔除可能的 Leader，只保留成員
                 members_only = [p for p in full_pool if "Leader" not in p['name']]
-                # 強制隨機抽取 3 位成員出場
+                # 修正為 min(3, ...)，確保抽出 3 位成員
                 st.session_state.participants = random.sample(members_only, min(3, len(members_only)))
                 
                 st.session_state.user_avatar = "🧑‍🏫"
                 st.session_state.user_name = "Leader"
                 st.session_state.chat_history = [] 
             else:
-                # 取得名單
                 full_pool = personas.get_mixed_participants(count=5, include_leader=True)
-                # 區分 Leader 與成員
                 ai_leader = [p for p in full_pool if "Leader" in p['name']]
                 members_only = [p for p in full_pool if "Leader" not in p['name']]
                 
-                # 隨機抽取 2 位 AI 成員出場 (加上使用者自己剛好 3位成員 + 1位Leader = 4人團體)
-                selected_members = random.sample(members_only, min(2, len(members_only)))
+                # 修正為 min(3, ...)，抽出 3 位 AI 成員，加上 AI Leader，畫面上就是 4 個角色
+                selected_members = random.sample(members_only, min(3, len(members_only)))
                 st.session_state.participants = ai_leader + selected_members
                 
                 st.session_state.user_avatar = "🙋"
