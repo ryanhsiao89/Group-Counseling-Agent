@@ -76,7 +76,6 @@ with st.sidebar:
         st.markdown("---")
         st.markdown("### 📝 學習反思工具")
         
-        # 將對話紀錄整理成純文字格式
         transcript = f"【團體諮商模擬演練逐字稿】\n學號：{st.session_state.student_id}\n匯出時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         for msg in st.session_state.chat_history:
             transcript += f"{msg['role']}： {msg['content']}\n\n"
@@ -184,7 +183,6 @@ elif "current_session_id" not in st.session_state:
             else:
                 final_context = context_input
 
-            # 啟動並寫入 Google Sheet
             session_id = data_manager.start_session(st.session_state.student_id, user_role, final_group_type, session_num)
             
             st.session_state.current_session_id = session_id
@@ -196,14 +194,29 @@ elif "current_session_id" not in st.session_state:
                 "atmosphere": final_context 
             }
             
-            # ⏬ 擴充功能二（降低負荷）：生成人數由 5 降至 4 人
+            # ⏬ 終極擴充：強制過濾名單，實現「四選三」隨機出場機制
             if user_role == "團體帶領者 (Leader)":
-                st.session_state.participants = personas.get_mixed_participants(count=4, include_leader=False)
+                # 取得名單
+                full_pool = personas.get_mixed_participants(count=5, include_leader=False)
+                # 剔除可能的 Leader，只保留成員
+                members_only = [p for p in full_pool if "Leader" not in p['name']]
+                # 強制隨機抽取 3 位成員出場
+                st.session_state.participants = random.sample(members_only, min(3, len(members_only)))
+                
                 st.session_state.user_avatar = "🧑‍🏫"
                 st.session_state.user_name = "Leader"
                 st.session_state.chat_history = [] 
             else:
-                st.session_state.participants = personas.get_mixed_participants(count=4, include_leader=True)
+                # 取得名單
+                full_pool = personas.get_mixed_participants(count=5, include_leader=True)
+                # 區分 Leader 與成員
+                ai_leader = [p for p in full_pool if "Leader" in p['name']]
+                members_only = [p for p in full_pool if "Leader" not in p['name']]
+                
+                # 隨機抽取 2 位 AI 成員出場 (加上使用者自己剛好 3位成員 + 1位Leader = 4人團體)
+                selected_members = random.sample(members_only, min(2, len(members_only)))
+                st.session_state.participants = ai_leader + selected_members
+                
                 st.session_state.user_avatar = "🙋"
                 st.session_state.user_name = "Member"
                 
@@ -249,4 +262,64 @@ else:
         data_manager.log_message(st.session_state.current_session_id, st.session_state.student_id, "User", user_input)
 
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash
+            model="gemini-2.5-flash", 
+            google_api_key=st.session_state.api_key,
+            temperature=0
+        )
+        
+        error_shown = False
+        
+        # ⏬ 動態發言機制 (降低 API 負荷)
+        active_speakers = []
+        for p in st.session_state.participants:
+            if "Leader" in p['name']:
+                if random.random() < 0.80:
+                    active_speakers.append(p)
+            else:
+                if random.random() < 0.40:
+                    active_speakers.append(p)
+                    
+        # 防冷場機制
+        if not active_speakers:
+            active_speakers = [random.choice(st.session_state.participants)]
+            
+        random.shuffle(active_speakers)
+        
+        for participant in active_speakers:
+            with st.spinner(f"{participant['name']} 思考中..."):
+                context_prompt = f"""
+                [DYNAMIC CONTEXT]
+                Group Type: {ctx['type']}
+                Session Number: {ctx['session']}
+                Atmosphere: {ctx['atmosphere']}
+                Your Role: {participant['system_prompt']}
+                User Role: {st.session_state.user_role}
+                
+                INSTRUCTION: 
+                Respond naturally according to your persona.
+                """
+                
+                messages = [SystemMessage(content=context_prompt)]
+                for history_msg in st.session_state.chat_history:
+                    role = history_msg["role"]
+                    content = history_msg["content"]
+                    if role == "user":
+                        messages.append(HumanMessage(content=f"User: {content}"))
+                    else:
+                        prefix = "You" if role == participant['name'] else role
+                        messages.append(HumanMessage(content=f"{prefix}: {content}"))
+                
+                try:
+                    response = llm.invoke(messages)
+                    content = response.content
+                    if len(content.strip()) > 1:
+                        st.chat_message("assistant", avatar=participant['avatar']).write(f"**{participant['name']}:** {content}")
+                        st.session_state.chat_history.append({"role": participant['name'], "content": content})
+                        data_manager.log_message(st.session_state.current_session_id, st.session_state.student_id, participant['name'], content)
+                    
+                    time.sleep(2.5)
+                    
+                except Exception as e:
+                    if not error_shown and ("429" in str(e) or "quota" in str(e).lower() or "exhausted" in str(e).lower()):
+                        st.warning("⏳ 系統提示：伺服器稍微有點塞車，請稍等約 20 秒後再發言。")
+                        error_shown = True
