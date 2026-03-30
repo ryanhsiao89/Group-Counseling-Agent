@@ -64,6 +64,9 @@ if "otp_verified" not in st.session_state: st.session_state.otp_verified = False
 if "generated_otp" not in st.session_state: st.session_state.generated_otp = None
 if "student_id" not in st.session_state: st.session_state.student_id = ""
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
+# ⏬ 新增多把 API Key 的狀態管理
+if "api_keys" not in st.session_state: st.session_state.api_keys = []
+if "current_key_index" not in st.session_state: st.session_state.current_key_index = 0
 
 # --- 側邊欄 (基本說明) ---
 with st.sidebar:
@@ -121,7 +124,8 @@ elif "current_session_id" not in st.session_state:
     
     with col1:
         st.markdown("### 🔑 系統設定")
-        api_key_input = st.text_input("Google API Key", type="password")
+        # ⏬ 修改介面提示，允許貼入多把 Key 並用逗號隔開
+        api_key_input = st.text_input("Google API Key (若有多把請用半形逗號 , 分隔)", type="password", placeholder="例如: AIzaSy..., AIzaSy..., AIzaSy...")
         user_role = st.radio("👉 您的角色", 
                              ["團體帶領者 (Leader)", "團體成員 (Member)"])
     
@@ -154,6 +158,15 @@ elif "current_session_id" not in st.session_state:
     if st.button("開始演練", type="primary"):
         if api_key_input and final_group_type:
             
+            # ⏬ 解析 API Keys 存入陣列
+            parsed_keys = [k.strip() for k in api_key_input.split(",") if k.strip()]
+            if not parsed_keys:
+                st.warning("請至少輸入一把有效的 API Key！")
+                st.stop()
+            
+            st.session_state.api_keys = parsed_keys
+            st.session_state.current_key_index = 0
+            
             if context_input.strip() == "":
                 random_contexts = [
                     "【溫和破冰】這是第一次團體，成員們態度都很友善，但稍微有些害羞。大家面帶微笑看著帶領者，等待您給予明確的指示或有趣的破冰小活動。",
@@ -169,7 +182,6 @@ elif "current_session_id" not in st.session_state:
             session_id = data_manager.start_session(st.session_state.student_id, user_role, final_group_type, session_num)
             
             st.session_state.current_session_id = session_id
-            st.session_state.api_key = api_key_input
             st.session_state.user_role = user_role
             st.session_state.group_context = {
                 "type": final_group_type, 
@@ -217,7 +229,7 @@ else:
         with cols[idx]:
             st.info(f"{p['avatar']} {p['name']}\n\n{p['type']}")
 
-    # ⏬ 新增：防呆 UX 側邊欄設計 (將下載與登出整合)
+    # 防呆 UX 側邊欄設計 (將下載與登出整合)
     with st.sidebar:
         st.markdown("---")
         st.markdown("### 📝 演練結束區")
@@ -227,10 +239,10 @@ else:
         for msg in st.session_state.chat_history:
             transcript += f"{msg['role']}： {msg['content']}\n\n"
             
-        # 按鈕 1：醒目的下載按鈕 (type="primary")
+        # 按鈕 1：醒目的下載按鈕 (確保保有防亂碼的 encode)
         st.download_button(
             label="📥 1. 先下載本次逐字稿",
-            data=transcript,
+            data=transcript.encode('utf-8-sig'), 
             file_name=f"GroupLog_{st.session_state.student_id}_{datetime.now().strftime('%m%d_%H%M')}.txt",
             mime="text/plain",
             use_container_width=True,
@@ -261,16 +273,10 @@ else:
         st.chat_message("user", avatar=st.session_state.user_avatar).write(user_input)
         st.session_state.chat_history.append({"role": "user", "content": user_input})
         data_manager.log_message(st.session_state.current_session_id, st.session_state.student_id, "User", user_input)
-
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash", 
-            google_api_key=st.session_state.api_key,
-            temperature=0
-        )
         
         error_shown = False
         
-        # ⏬ 動態發言機制 (降低 API 負荷)
+        # 動態發言機制 (降低 API 負荷)
         active_speakers = []
         for p in st.session_state.participants:
             if "Leader" in p['name']:
@@ -310,17 +316,43 @@ else:
                         prefix = "You" if role == participant['name'] else role
                         messages.append(HumanMessage(content=f"{prefix}: {content}"))
                 
-                try:
-                    response = llm.invoke(messages)
-                    content = response.content
-                    if len(content.strip()) > 1:
-                        st.chat_message("assistant", avatar=participant['avatar']).write(f"**{participant['name']}:** {content}")
-                        st.session_state.chat_history.append({"role": participant['name'], "content": content})
-                        data_manager.log_message(st.session_state.current_session_id, st.session_state.student_id, participant['name'], content)
+                # ⏬ 無縫備用 Key 切換重試迴圈
+                success = False
+                while not success and st.session_state.current_key_index < len(st.session_state.api_keys):
+                    current_key = st.session_state.api_keys[st.session_state.current_key_index]
                     
-                    time.sleep(2.5)
+                    llm = ChatGoogleGenerativeAI(
+                        model="gemini-2.5-flash", 
+                        google_api_key=current_key,
+                        temperature=0
+                    )
                     
-                except Exception as e:
-                    if not error_shown and ("429" in str(e) or "quota" in str(e).lower() or "exhausted" in str(e).lower()):
-                        st.warning("⏳ 系統提示：伺服器稍微有點塞車，請稍等約 20 秒後再發言。")
-                        error_shown = True
+                    try:
+                        response = llm.invoke(messages)
+                        content = response.content
+                        if len(content.strip()) > 1:
+                            st.chat_message("assistant", avatar=participant['avatar']).write(f"**{participant['name']}:** {content}")
+                            st.session_state.chat_history.append({"role": participant['name'], "content": content})
+                            data_manager.log_message(st.session_state.current_session_id, st.session_state.student_id, participant['name'], content)
+                        
+                        time.sleep(2.5)
+                        success = True # 成功生成，跳出 Retry 迴圈
+                        
+                    except Exception as e:
+                        error_msg = str(e).lower()
+                        if "429" in error_msg or "quota" in error_msg or "exhausted" in error_msg:
+                            # 檢查是否還有下一把 Key
+                            if st.session_state.current_key_index < len(st.session_state.api_keys) - 1:
+                                st.session_state.current_key_index += 1
+                                # 顯示無痛切換的提示 (Toast)
+                                st.toast(f"🔄 第 {st.session_state.current_key_index} 把 API Key 額度用盡，已自動切換備用 Key！", icon="🔋")
+                                time.sleep(1)
+                                continue # 重新執行 while 迴圈，用新的 Key 再次發送
+                            else:
+                                if not error_shown:
+                                    st.error("❌ 您輸入的所有 API Key 額度皆已用盡！請稍等幾分鐘後再試，或更換新的 API Key。")
+                                    error_shown = True
+                                break # 放棄這個虛擬成員的發言
+                        else:
+                            st.error(f"⚠️ 發生未知錯誤：{e}")
+                            break
