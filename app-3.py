@@ -8,6 +8,7 @@ import random
 import smtplib
 from email.mime.text import MIMEText
 from datetime import datetime
+import os
 
 st.set_page_config(page_title="AI 團體諮商模擬器", page_icon="🎭", layout="wide")
 
@@ -35,7 +36,6 @@ WHITELIST = {
     'TA1140202': 'ta1140202@hcu.edu.tw',
     'TA1140203': 'ta1140203@hcu.edu.tw',
     'KA1130107': 'si847452195@gmail.com',
-    'BB1122028': 'bb1122028@hcu.edu.tw',
     '112152516': 'ryanhsiao89@gmail.com',
     'HOPE HARN': 'hopehopejoy@gmail.com',
 }
@@ -158,31 +158,42 @@ if not st.session_state.otp_verified:
     st.title("🛡️ 團體諮商 AI 模擬系統")
     st.info("本系統為專屬演練平台。為確保研究資料正確性，請先進行身分驗證。")
     
-    st.markdown("### 🧑‍🤝‍🧑 步驟一：輸入學號獲取驗證碼")
-    student_id_input = st.text_input("請輸入您的學號/ID：", placeholder="例如：BB1112067")
+    st.markdown("### 🧑‍🤝‍🧑 步驟一：輸入學號或訪客碼")
+    # ⏬ 更新介面提示詞，引導訪客輸入 GUEST
+    student_id_input = st.text_input("請輸入您的學號/ID（研討會訪客請輸入 GUEST）：", placeholder="例如：BB1112067 或 GUEST")
     
-    if st.button("📧 發送驗證碼"):
+    # ⏬ 將按鈕文字修改得更通用
+    if st.button("🚀 登入 / 發送驗證碼"):
         if not student_id_input.strip():
-            st.error("❌ 學號/ID 不能為空！")
+            st.error("❌ 欄位不能為空！")
         else:
             student_id_clean = student_id_input.strip().upper() 
-            if student_id_input.strip() in WHITELIST:
-                student_id_clean = student_id_input.strip()
+            
+            # ⏬ 新增：訪客專屬免驗證一鍵通關通道
+            if student_id_clean == "GUEST":
+                st.session_state.otp_verified = True
+                st.session_state.student_id = "GUEST"
+                st.rerun()
                 
-            if student_id_clean not in WHITELIST:
-                st.error("❌ 查無此學號/ID，請確認您是否具備本研究之參與資格。")
+            # 原本的白名單與 OTP 驗證邏輯
             else:
-                target_email = WHITELIST[student_id_clean]
-                masked_email = target_email[:4] + "****" + target_email[target_email.find("@"):]
-                
-                with st.spinner("正在發送驗證信，請稍候..."):
-                    otp = str(random.randint(100000, 999999))
-                    if send_otp_email(target_email, otp):
-                        st.session_state.generated_otp = otp
-                        st.session_state.student_id = student_id_clean
-                        st.success(f"✅ 驗證碼已發送至您的專屬信箱 ({masked_email})！請檢查收件匣（若無請檢查垃圾郵件）。")
-                    else:
-                        st.error("❌ 寄信失敗，請向研究者確認系統後台信箱設定。")
+                if student_id_input.strip() in WHITELIST:
+                    student_id_clean = student_id_input.strip()
+                    
+                if student_id_clean not in WHITELIST:
+                    st.error("❌ 查無此學號/ID，請確認您是否具備本研究之參與資格。")
+                else:
+                    target_email = WHITELIST[student_id_clean]
+                    masked_email = target_email[:4] + "****" + target_email[target_email.find("@"):]
+                    
+                    with st.spinner("正在發送驗證信，請稍候..."):
+                        otp = str(random.randint(100000, 999999))
+                        if send_otp_email(target_email, otp):
+                            st.session_state.generated_otp = otp
+                            st.session_state.student_id = student_id_clean
+                            st.success(f"✅ 驗證碼已發送至您的專屬信箱 ({masked_email})！請檢查收件匣（若無請檢查垃圾郵件）。")
+                        else:
+                            st.error("❌ 寄信失敗，請向研究者確認系統後台信箱設定。")
     
     if st.session_state.generated_otp:
         st.markdown("### 🔐 步驟二：輸入驗證碼")
@@ -225,7 +236,6 @@ elif "current_session_id" not in st.session_state:
         else:
             final_group_type = selected_type
 
-        # ⏬ 整合完成的 15 大諮商學派下拉選單
         selected_approach = st.selectbox("🧠 理論學派取向 (可選)", list(APPROACH_PROMPTS.keys()))
 
         session_num = st.slider("現在是第幾次團體？", 1, 10, 1)
@@ -247,7 +257,6 @@ elif "current_session_id" not in st.session_state:
             st.session_state.api_keys = parsed_keys
             st.session_state.current_key_index = 0
             
-            # 處理情境與學派提示詞的整合
             if context_input.strip() == "":
                 random_contexts = [
                     "【溫和破冰】這是第一次團體，成員們態度都很友善，但稍微有些害羞。大家面帶微笑看著帶領者，等待您給予明確的指示或有趣的破冰小活動。",
@@ -260,7 +269,6 @@ elif "current_session_id" not in st.session_state:
             else:
                 base_context = context_input
 
-            # 將學派專屬提示詞強勢附加到 Context 後方
             final_context = base_context + "\n" + APPROACH_PROMPTS[selected_approach]
 
             session_id = data_manager.start_session(st.session_state.student_id, user_role, final_group_type, session_num)
@@ -271,7 +279,7 @@ elif "current_session_id" not in st.session_state:
                 "type": final_group_type, 
                 "session": session_num, 
                 "atmosphere": final_context,
-                "approach": selected_approach # 紀錄選擇的學派
+                "approach": selected_approach 
             }
             
             # 四選三出場機制
@@ -307,7 +315,6 @@ else:
     ctx = st.session_state.group_context
     st.subheader(f"💬 {ctx['type']} (第 {ctx['session']} 次)")
     
-    # 畫面上優雅地顯示當前學派，讓學生知道現在的理論背景
     approach_display = f" | 🧠 學派取向：{ctx['approach']}" if ctx['approach'] != "不指定（預設）" else ""
     st.success(f"🎬 **當前情境設定：** {ctx['atmosphere'].split('[特別指示')[0].strip()}{approach_display}")
     
@@ -372,31 +379,40 @@ else:
         
         for participant in active_speakers:
             with st.spinner(f"{participant['name']} 思考中..."):
-                context_prompt = f"""
-                [DYNAMIC CONTEXT]
-                Group Type: {ctx['type']}
-                Session Number: {ctx['session']}
-                Atmosphere: {ctx['atmosphere']}
-                Your Role: {participant['system_prompt']}
-                User Role: {st.session_state.user_role}
-                
-                INSTRUCTION: 
-                Respond naturally according to your persona.
-                """
-                
-                messages = [SystemMessage(content=context_prompt)]
-                for history_msg in st.session_state.chat_history:
-                    role = history_msg["role"]
-                    content = history_msg["content"]
-                    if role == "user":
-                        messages.append(HumanMessage(content=f"User: {content}"))
-                    else:
-                        prefix = "You" if role == participant['name'] else role
-                        messages.append(HumanMessage(content=f"{prefix}: {content}"))
                 
                 success = False
                 while not success and st.session_state.current_key_index < len(st.session_state.api_keys):
+                    
+                    context_prompt = f"""
+                    [DYNAMIC CONTEXT]
+                    Group Type: {ctx['type']}
+                    Session Number: {ctx['session']}
+                    Atmosphere: {ctx['atmosphere']}
+                    Your Role: {participant['system_prompt']}
+                    User Role: {st.session_state.user_role}
+                    
+                    INSTRUCTION: 
+                    Respond naturally according to your persona.
+                    """
+                    
+                    history_text = ""
+                    for history_msg in st.session_state.chat_history:
+                        role = history_msg["role"]
+                        content = history_msg["content"]
+                        if role == "user":
+                            history_text += f"User: {content}\n"
+                        else:
+                            prefix = "You" if role == participant['name'] else role
+                            history_text += f"{prefix}: {content}\n"
+                            
+                    messages = [
+                        SystemMessage(content=context_prompt),
+                        HumanMessage(content=f"[Conversation Transcript]\n{history_text}\n\n[Instruction]\nWhat do you (as {participant['name']}) say next? Please provide your direct speech only.")
+                    ]
+
                     current_key = st.session_state.api_keys[st.session_state.current_key_index]
+                    
+                    os.environ["GOOGLE_API_KEY"] = current_key
                     
                     llm = ChatGoogleGenerativeAI(
                         model="gemini-2.5-flash", 
