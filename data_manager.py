@@ -17,6 +17,9 @@ SCOPE = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+MAX_RETRIES = 3
+MAX_CELL_CHARS = 45000
+
 SESSION_HEADERS = [
     "Session_ID",
     "Student_ID",
@@ -34,7 +37,46 @@ CHATLOG_HEADERS = [
     "Message",
 ]
 
-MAX_RETRIES = 3
+UPLOADED_TRANSCRIPT_HEADERS = [
+    "Timestamp",
+    "Session_ID",
+    "Student_ID",
+    "Session_Num",
+    "Filename",
+    "Chunk_Index",
+    "Chunk_Total",
+    "Transcript_Text",
+]
+
+TRANSCRIPT_SNAPSHOT_HEADERS = [
+    "Timestamp",
+    "Session_ID",
+    "Student_ID",
+    "Role",
+    "Group_Type",
+    "Session_Num",
+    "Approach",
+    "Reason",
+    "Chunk_Index",
+    "Chunk_Total",
+    "Transcript_Text",
+]
+
+ASSESSMENT_HEADERS = [
+    "Timestamp",
+    "Session_ID",
+    "Student_ID",
+    "Session_Num",
+    "Total_Score",
+    "Empathy_Score",
+    "Process_Score",
+    "Technique_Score",
+    "Safety_Score",
+    "Structure_Score",
+    "Feedback",
+    "Student_Intervention",
+    "Raw_Assessment",
+]
 
 
 def get_taiwan_time():
@@ -45,9 +87,29 @@ def print_error(action, error):
     print(f"[data_manager] {action} failed: {error}")
 
 
+def sanitize_cell(value):
+    if value is None:
+        return ""
+
+    text = str(value)
+
+    if len(text) > MAX_CELL_CHARS:
+        return text[:MAX_CELL_CHARS] + "\n...[內容過長，已截斷]"
+
+    return text
+
+
+def split_text(text, chunk_size=MAX_CELL_CHARS):
+    text = str(text or "")
+
+    if not text:
+        return [""]
+
+    return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+
+
 @st.cache_resource(show_spinner=False)
 def get_sheet_connection():
-    """建立並快取 Google Sheets 連線，避免每句對話都重新連線。"""
     try:
         creds_dict = st.secrets.get("gcp_service_account")
 
@@ -69,7 +131,6 @@ def get_sheet_connection():
 
 @st.cache_resource(show_spinner=False)
 def get_worksheet(worksheet_name, headers_tuple):
-    """取得並快取工作表；如果分頁不存在，就自動建立。"""
     sheet = get_sheet_connection()
 
     if sheet is None:
@@ -85,7 +146,7 @@ def get_worksheet(worksheet_name, headers_tuple):
             rows=1000,
             cols=max(len(headers), 5),
         )
-        worksheet.append_row(headers, value_input_option="USER_ENTERED")
+        worksheet.append_row(headers, value_input_option="RAW")
         return worksheet
     except Exception as e:
         print_error(f"open worksheet {worksheet_name}", e)
@@ -95,7 +156,7 @@ def get_worksheet(worksheet_name, headers_tuple):
         first_row = worksheet.row_values(1)
 
         if not first_row:
-            worksheet.append_row(headers, value_input_option="USER_ENTERED")
+            worksheet.append_row(headers, value_input_option="RAW")
 
     except Exception as e:
         print_error(f"check worksheet header {worksheet_name}", e)
@@ -104,15 +165,15 @@ def get_worksheet(worksheet_name, headers_tuple):
 
 
 def append_row_with_retry(worksheet, row, action_name):
-    """寫入 Google Sheet；遇到暫時性錯誤會自動重試。"""
     if worksheet is None:
         return False
 
+    safe_row = [sanitize_cell(value) for value in row]
     last_error = None
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            worksheet.append_row(row, value_input_option="USER_ENTERED")
+            worksheet.append_row(safe_row, value_input_option="RAW")
             return True
 
         except Exception as e:
@@ -127,7 +188,6 @@ def append_row_with_retry(worksheet, row, action_name):
 
 
 def start_session(student_id, role, group_type, session_num):
-    """學生開始使用，紀錄 Session。即使寫入失敗，也會回傳 session_id。"""
     session_id = str(uuid.uuid4())
     start_time = get_taiwan_time()
 
@@ -143,9 +203,7 @@ def start_session(student_id, role, group_type, session_num):
 
 
 def log_message(session_id, student_id, speaker, message):
-    """紀錄每一句對話到 ChatLogs 分頁。寫入失敗不會中斷主程式。"""
     timestamp = get_taiwan_time()
-
     worksheet = get_worksheet("ChatLogs", tuple(CHATLOG_HEADERS))
 
     return append_row_with_retry(
@@ -155,6 +213,93 @@ def log_message(session_id, student_id, speaker, message):
     )
 
 
+def log_uploaded_transcript(session_id, student_id, session_num, filename, transcript_text):
+    timestamp = get_taiwan_time()
+    worksheet = get_worksheet("UploadedTranscripts", tuple(UPLOADED_TRANSCRIPT_HEADERS))
+
+    chunks = split_text(transcript_text)
+    chunk_total = len(chunks)
+    results = []
+
+    for index, chunk in enumerate(chunks, start=1):
+        results.append(
+            append_row_with_retry(
+                worksheet,
+                [
+                    timestamp,
+                    session_id,
+                    student_id,
+                    session_num,
+                    filename,
+                    index,
+                    chunk_total,
+                    chunk,
+                ],
+                "write uploaded transcript",
+            )
+        )
+
+    return all(results)
+
+
+def log_transcript_snapshot(session_id, student_id, role, group_type, session_num, approach, transcript_text, reason):
+    timestamp = get_taiwan_time()
+    worksheet = get_worksheet("TranscriptSnapshots", tuple(TRANSCRIPT_SNAPSHOT_HEADERS))
+
+    chunks = split_text(transcript_text)
+    chunk_total = len(chunks)
+    results = []
+
+    for index, chunk in enumerate(chunks, start=1):
+        results.append(
+            append_row_with_retry(
+                worksheet,
+                [
+                    timestamp,
+                    session_id,
+                    student_id,
+                    role,
+                    group_type,
+                    session_num,
+                    approach,
+                    reason,
+                    index,
+                    chunk_total,
+                    chunk,
+                ],
+                "write transcript snapshot",
+            )
+        )
+
+    return all(results)
+
+
+def log_assessment(session_id, student_id, session_num, assessment, raw_assessment="", student_intervention=""):
+    timestamp = get_taiwan_time()
+    worksheet = get_worksheet("Assessments", tuple(ASSESSMENT_HEADERS))
+
+    assessment = assessment or {}
+
+    return append_row_with_retry(
+        worksheet,
+        [
+            timestamp,
+            session_id,
+            student_id,
+            session_num,
+            assessment.get("total_score", ""),
+            assessment.get("empathy_score", ""),
+            assessment.get("process_score", ""),
+            assessment.get("technique_score", ""),
+            assessment.get("safety_score", ""),
+            assessment.get("structure_score", ""),
+            assessment.get("feedback", ""),
+            student_intervention,
+            raw_assessment,
+        ],
+        "write assessment",
+    )
+
+
 def end_session(session_id):
-    """目前 Google Sheet 版不需要特別更新結束時間。"""
     return True
