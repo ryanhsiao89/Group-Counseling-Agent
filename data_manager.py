@@ -35,6 +35,14 @@ CHATLOG_HEADERS = [
     "Student_ID",
     "Speaker",
     "Message",
+    "Role_Mode",
+    "Group_Type",
+    "Session_Num",
+    "Approach",
+    "Speaker_Type",
+    "Turn_Index",
+    "Message_Type",
+    "Source",
 ]
 
 UPLOADED_TRANSCRIPT_HEADERS = [
@@ -129,6 +137,22 @@ def get_sheet_connection():
         return None
 
 
+def ensure_headers(worksheet, headers):
+    try:
+        first_row = worksheet.row_values(1)
+
+        if not first_row:
+            worksheet.append_row(headers, value_input_option="RAW")
+            return
+
+        for index, header in enumerate(headers, start=1):
+            if index > len(first_row) or first_row[index - 1] != header:
+                worksheet.update_cell(1, index, header)
+
+    except Exception as e:
+        print_error("ensure headers", e)
+
+
 @st.cache_resource(show_spinner=False)
 def get_worksheet(worksheet_name, headers_tuple):
     sheet = get_sheet_connection()
@@ -152,15 +176,7 @@ def get_worksheet(worksheet_name, headers_tuple):
         print_error(f"open worksheet {worksheet_name}", e)
         return None
 
-    try:
-        first_row = worksheet.row_values(1)
-
-        if not first_row:
-            worksheet.append_row(headers, value_input_option="RAW")
-
-    except Exception as e:
-        print_error(f"check worksheet header {worksheet_name}", e)
-
+    ensure_headers(worksheet, headers)
     return worksheet
 
 
@@ -202,13 +218,40 @@ def start_session(student_id, role, group_type, session_num):
     return session_id
 
 
-def log_message(session_id, student_id, speaker, message):
+def log_message(
+    session_id,
+    student_id,
+    speaker,
+    message,
+    role_mode="",
+    group_type="",
+    session_num="",
+    approach="",
+    speaker_type="",
+    turn_index="",
+    message_type="dialogue",
+    source="live",
+):
     timestamp = get_taiwan_time()
     worksheet = get_worksheet("ChatLogs", tuple(CHATLOG_HEADERS))
 
     return append_row_with_retry(
         worksheet,
-        [timestamp, session_id, student_id, speaker, message],
+        [
+            timestamp,
+            session_id,
+            student_id,
+            speaker,
+            message,
+            role_mode,
+            group_type,
+            session_num,
+            approach,
+            speaker_type,
+            turn_index,
+            message_type,
+            source,
+        ],
         "write chat log",
     )
 
