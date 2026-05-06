@@ -58,6 +58,7 @@ DEFAULT_SESSION_STATE = {
     "user_name": "User",
     "group_context": None,
     "previous_transcript_text": "",
+    "turn_index": 0,
 }
 
 
@@ -78,9 +79,49 @@ def safe_start_session(student_id, user_role, group_type, session_num):
         return f"local_{student_id}_{int(time.time())}"
 
 
-def safe_log_message(session_id, student_id, role, content):
+def role_to_speaker_label(role):
+    if role == "user":
+        if st.session_state.user_role == "團體帶領者 (Leader)":
+            return "Student Leader"
+        return "Student Member"
+
+    return role
+
+
+def role_to_speaker_type(role):
+    if role == "user":
+        if st.session_state.user_role == "團體帶領者 (Leader)":
+            return "student_leader"
+        return "student_member"
+
+    if role == "System":
+        return "system"
+
+    if "Leader" in role:
+        return "ai_leader"
+
+    return "ai_member"
+
+
+def safe_log_chat_message(role, content, message_type="dialogue", source="live"):
     try:
-        data_manager.log_message(session_id, student_id, role, content)
+        ctx = st.session_state.group_context or {}
+        st.session_state.turn_index += 1
+
+        data_manager.log_message(
+            session_id=st.session_state.current_session_id,
+            student_id=st.session_state.student_id,
+            speaker=role_to_speaker_label(role),
+            message=content,
+            role_mode=st.session_state.user_role,
+            group_type=ctx.get("type", ""),
+            session_num=ctx.get("session", ""),
+            approach=ctx.get("approach", ""),
+            speaker_type=role_to_speaker_type(role),
+            turn_index=st.session_state.turn_index,
+            message_type=message_type,
+            source=source,
+        )
     except Exception as e:
         print(f"log_message failed: {e}")
 
@@ -167,8 +208,14 @@ def send_otp_email(receiver_email, otp):
 
 def is_quota_error(error):
     error_msg = str(error).lower()
-    quota_keywords = ["429", "quota", "exhausted", "rate limit", "resource exhausted"]
-    return any(keyword in error_msg for keyword in quota_keywords)
+    keywords = ["429", "quota", "exhausted", "rate limit", "resource exhausted"]
+    return any(keyword in error_msg for keyword in keywords)
+
+
+def is_invalid_key_error(error):
+    error_msg = str(error).lower()
+    keywords = ["api_key_invalid", "api key not valid", "key not valid", "invalid api key"]
+    return any(keyword in error_msg for keyword in keywords)
 
 
 def normalize_llm_content(response):
@@ -209,16 +256,23 @@ def generate_ai_reply(messages, show_key_switch=True):
         except Exception as e:
             last_error = e
 
+            if is_invalid_key_error(e):
+                if st.session_state.current_key_index < len(st.session_state.api_keys) - 1:
+                    st.session_state.current_key_index += 1
+                    if show_key_switch:
+                        st.toast("🔄 其中一把 API Key 無效，已嘗試切換下一把。", icon="🔑")
+                    continue
+
+                raise RuntimeError("Google API Key 無效，請確認是否貼上 Gemini API Key。")
+
             if is_quota_error(e):
                 if st.session_state.current_key_index < len(st.session_state.api_keys) - 1:
                     st.session_state.current_key_index += 1
-
                     if show_key_switch:
                         st.toast(
                             f"🔄 API Key 額度用盡，已切換到第 {st.session_state.current_key_index + 1} 把 Key。",
                             icon="🔋",
                         )
-
                     continue
 
                 raise RuntimeError("所有 API Key 額度皆已用盡，請稍後再試或更換 Key。")
@@ -245,7 +299,19 @@ def read_uploaded_text(uploaded_file):
 
 def normalize_role_name(role):
     role = role.strip()
-    user_aliases = ["User", "user", "使用者", "學生", "Leader", "Member", "團體帶領者", "團體成員"]
+
+    user_aliases = [
+        "User",
+        "user",
+        "使用者",
+        "學生",
+        "Leader",
+        "Member",
+        "Student Leader",
+        "Student Member",
+        "團體帶領者",
+        "團體成員",
+    ]
 
     if role in user_aliases:
         return "user"
@@ -253,7 +319,7 @@ def normalize_role_name(role):
     return role
 
 
-def parse_transcript_to_history(transcript_text, max_messages=80):
+def parse_transcript_to_history(transcript_text, max_messages=100):
     if not transcript_text:
         return []
 
@@ -297,7 +363,7 @@ def parse_transcript_to_history(transcript_text, max_messages=80):
 
         for symbol in ["：", ":"]:
             index = line.find(symbol)
-            if 0 < index <= 35:
+            if 0 < index <= 40:
                 split_index = index
                 break
 
@@ -431,7 +497,7 @@ def assess_leader_turn(ctx, student_intervention):
         return
 
     try:
-        recent_history = st.session_state.chat_history[-16:]
+        recent_history = st.session_state.chat_history[-18:]
         history_text = ""
 
         for msg in recent_history:
@@ -450,9 +516,9 @@ def assess_leader_turn(ctx, student_intervention):
 請根據以下團體脈絡與最近對話，評估「學生作為團體帶領者」剛剛這一次介入的專業度。
 這個評分只給教授後台參考，不會顯示給學生。
 
-團體類型：{ctx.get("type", "")}
-第幾次團體：{ctx.get("session", "")}
-學派取向：{ctx.get("approach", "")}
+團體類型：{ctx.get('type', '')}
+第幾次團體：{ctx.get('session', '')}
+學派取向：{ctx.get('approach', '')}
 
 評分向度，每項 0 到 5 分：
 1. empathy_score：同理與情緒涵容
@@ -498,7 +564,21 @@ def assess_leader_turn(ctx, student_intervention):
         )
 
     except Exception as e:
-        print(f"hidden assessment failed: {e}")
+        safe_log_assessment(
+            session_id=st.session_state.current_session_id,
+            student_id=st.session_state.student_id,
+            session_num=ctx.get("session", ""),
+            assessment={},
+            raw_assessment=f"assessment_error: {e}",
+            student_intervention=student_intervention,
+        )
+
+
+def transcript_role_label(role):
+    if role == "user":
+        return role_to_speaker_label(role)
+
+    return role
 
 
 def build_transcript(ctx):
@@ -513,7 +593,7 @@ def build_transcript(ctx):
     for msg in st.session_state.chat_history:
         if msg.get("role") == "System":
             continue
-        transcript += f"{msg.get('role', '')}： {msg.get('content', '')}\n\n"
+        transcript += f"{transcript_role_label(msg.get('role', ''))}： {msg.get('content', '')}\n\n"
 
     return transcript
 
@@ -652,7 +732,7 @@ elif not st.session_state.current_session_id:
     with col1:
         st.markdown("### 🔑 系統設定")
         api_key_input = st.text_input(
-            "Google API Key（若有多把請用半形逗號 , 分隔）",
+            "Google Gemini API Key（若有多把請用半形逗號 , 分隔）",
             type="password",
             placeholder="例如：AIzaSy..., AIzaSy...",
         )
@@ -718,10 +798,10 @@ elif not st.session_state.current_session_id:
             st.warning("⚠️ 上傳檔案內容為空。")
 
     if st.button("開始演練", type="primary"):
-        parsed_keys = [key.strip() for key in api_key_input.split(",") if key.strip()]
+        parsed_keys = [key.strip() for key in api_key_input.replace("，", ",").split(",") if key.strip()]
 
         if not parsed_keys:
-            st.warning("請至少輸入一把有效的 Google API Key。")
+            st.warning("請至少輸入一把有效的 Google Gemini API Key。")
             st.stop()
 
         if not final_group_type:
@@ -739,6 +819,7 @@ elif not st.session_state.current_session_id:
         st.session_state.api_keys = parsed_keys
         st.session_state.current_key_index = 0
         st.session_state.previous_transcript_text = previous_transcript_text
+        st.session_state.turn_index = 0
 
         if context_input.strip():
             base_context = context_input.strip()
@@ -797,6 +878,7 @@ elif not st.session_state.current_session_id:
 
         if previous_transcript_text:
             st.session_state.chat_history = uploaded_history
+
             safe_log_uploaded_transcript(
                 session_id=session_id,
                 student_id=st.session_state.student_id,
@@ -804,6 +886,15 @@ elif not st.session_state.current_session_id:
                 filename=uploaded_transcript.name,
                 transcript_text=previous_transcript_text,
             )
+
+            for imported_msg in uploaded_history:
+                safe_log_chat_message(
+                    role=imported_msg.get("role", ""),
+                    content=imported_msg.get("content", ""),
+                    message_type="imported_transcript",
+                    source="uploaded_previous_transcript",
+                )
+
         else:
             if user_role == "團體成員 (Member)":
                 welcome_msg = (
@@ -811,7 +902,7 @@ elif not st.session_state.current_session_id:
                     f"今天是我們的第 {session_num} 次聚會，有人想先分享一下最近的心情嗎？"
                 )
                 st.session_state.chat_history = [{"role": "Dr. AI (Leader)", "content": welcome_msg}]
-                safe_log_message(session_id, st.session_state.student_id, "Dr. AI (Leader)", welcome_msg)
+                safe_log_chat_message("Dr. AI (Leader)", welcome_msg, "ai_response", "live")
             else:
                 st.session_state.chat_history = []
 
@@ -910,12 +1001,7 @@ else:
             "content": user_input,
         })
 
-        safe_log_message(
-            st.session_state.current_session_id,
-            st.session_state.student_id,
-            "User",
-            user_input,
-        )
+        safe_log_chat_message("user", user_input, "student_message", "live")
 
         active_speakers = []
 
@@ -974,7 +1060,7 @@ Do not mention that you are an AI unless the role setting explicitly requires it
                             continue
 
                         if role == "user":
-                            history_text += f"User: {content}\n"
+                            history_text += f"Student: {content}\n"
                         else:
                             prefix = "You" if role == participant_name else role
                             history_text += f"{prefix}: {content}\n"
@@ -1002,16 +1088,13 @@ Do not mention that you are an AI unless the role setting explicitly requires it
                         "content": content,
                     })
 
-                    safe_log_message(
-                        st.session_state.current_session_id,
-                        st.session_state.student_id,
-                        participant_name,
-                        content,
-                    )
+                    safe_log_chat_message(participant_name, content, "ai_response", "live")
 
                     time.sleep(1.2)
 
                 except Exception as e:
+                    error_text = f"{participant_name} 回應失敗：{e}"
+                    safe_log_chat_message("System", error_text, "ai_error", "system")
                     st.warning(f"⚠️ {participant_name} 暫時無法回應：{e}")
                     continue
 
