@@ -221,7 +221,7 @@ def send_otp_email(receiver_email, otp):
         body = (
             "您好：\n\n"
             "歡迎參與本研究並使用「團體諮商 AI 模擬演練系統」。\n\n"
-            f"您的本次登入驗證碼為：\n\n"
+            f"您的本次登入驗證碼為：【 {otp} 】\n\n"
             "請將此驗證碼輸入系統以開始演練。\n"
             "若非您本人操作，請忽略此信件。"
         )
@@ -243,6 +243,7 @@ def send_otp_email(receiver_email, otp):
     except Exception as e:
         st.error(f"❌ 驗證信寄送失敗：{e}")
         return False
+
 
 
 def is_quota_error(error):
