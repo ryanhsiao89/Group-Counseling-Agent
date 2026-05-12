@@ -20,6 +20,8 @@ EXAM_PHASE_SECONDS = 10 * 60
 MAX_PREVIOUS_CONTEXT_CHARS = 3500
 MAX_RECENT_HISTORY_MESSAGES = 12
 API_COOLDOWN_SECONDS = 90
+MAX_USER_INPUT_CHARS = 120
+INPUT_COOLDOWN_SECONDS = 5
 
 
 WHITELIST = {
@@ -65,6 +67,7 @@ DEFAULT_SESSION_STATE = {
     "group_context": None,
     "turn_index": 0,
     "api_blocked_until": 0,
+    "last_user_submit_at": 0,
     "exam_phase": 0,
     "phase_started_at": 0,
     "phase_1_transcript": "",
@@ -99,6 +102,33 @@ def phase_remaining_seconds():
 
 def phase_time_is_up():
     return phase_remaining_seconds() <= 0
+
+
+def get_input_cooldown_remaining():
+    last_submit_at = st.session_state.get("last_user_submit_at", 0)
+
+    if not last_submit_at:
+        return 0
+
+    elapsed = time.time() - last_submit_at
+    return max(0, int(INPUT_COOLDOWN_SECONDS - elapsed))
+
+
+def validate_student_input(user_input):
+    text = user_input.strip()
+
+    if not text:
+        return False, "請輸入內容。"
+
+    if len(text) > MAX_USER_INPUT_CHARS:
+        return False, f"本次輸入共 {len(text)} 字，已超過 {MAX_USER_INPUT_CHARS} 字上限，請縮短後再送出。"
+
+    cooldown_remaining = get_input_cooldown_remaining()
+
+    if cooldown_remaining > 0:
+        return False, f"請等待 {cooldown_remaining} 秒後再送出下一段。"
+
+    return True, text
 
 
 def safe_start_session(student_id, user_role, group_type, session_num):
@@ -191,7 +221,7 @@ def send_otp_email(receiver_email, otp):
         body = (
             "您好：\n\n"
             "歡迎參與本研究並使用「團體諮商 AI 模擬演練系統」。\n\n"
-            f"您的本次登入驗證碼為：【 {otp} 】\n\n"
+            f"您的本次登入驗證碼為：\n\n"
             "請將此驗證碼輸入系統以開始演練。\n"
             "若非您本人操作，請忽略此信件。"
         )
@@ -339,7 +369,6 @@ def select_participants():
     random.shuffle(pool)
 
     selected = []
-
     special = [p for p in pool if any(tag in p.get("type", "") for tag in ["情緒", "防衛", "抱怨", "逃避"])]
     normal = [p for p in pool if p not in special]
 
@@ -477,7 +506,7 @@ def transcript_role_label(role):
 
 def build_transcript(ctx):
     transcript = (
-        "【團體諮商模擬演練逐字稿】\n"
+        "\n"
         f"學號：{st.session_state.student_id}\n"
         f"匯出時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"目前階段：第 {st.session_state.exam_phase} 次團體\n"
@@ -486,7 +515,7 @@ def build_transcript(ctx):
 
     for msg in st.session_state.chat_history:
         if msg.get("role") == "System":
-            transcript += f"【系統紀錄】{msg.get('content', '')}\n\n"
+            transcript += f"{msg.get('content', '')}\n\n"
             continue
         transcript += f"{transcript_role_label(msg.get('role', ''))}： {msg.get('content', '')}\n\n"
 
@@ -512,7 +541,7 @@ def move_to_phase_2():
     base_context = ctx.get("base_context", "")
     approach_prompt = ctx.get("approach_prompt", "")
     previous_block = f"""
-【第 1 次團體逐字稿節錄】
+
 以下是剛剛第 1 次團體的內容節錄。第 2 次團體需要自然接續前次主題、成員情緒、互動與未完成議題。
 
 {phase_1_transcript[-MAX_PREVIOUS_CONTEXT_CHARS:]}
@@ -524,6 +553,7 @@ def move_to_phase_2():
     st.session_state.group_context = ctx
     st.session_state.exam_phase = 2
     st.session_state.phase_started_at = time.time()
+    st.session_state.last_user_submit_at = 0
 
     transition_msg = "第 1 次團體已結束，系統已自動保存逐字稿並進入第 2 次續談團體。"
     st.session_state.chat_history.append({"role": "System", "content": transition_msg})
@@ -725,11 +755,11 @@ elif not st.session_state.current_session_id:
             base_context = context_input.strip()
         else:
             random_contexts = [
-                "【溫和破冰】成員們態度友善，但稍微有些害羞，等待帶領者給予清楚的引導。",
-                "【建立共鳴】有成員提到最近對未來與課業有些迷惘，其他人聽了頻頻點頭。",
-                "【正向支持】目前氣氛溫暖，有成員分享了生活中微小但開心的事情。",
-                "【目標探索】成員對團體諮商感到好奇，也展現高度參與意願。",
-                "【溫和沉默】大家情緒平穩，只是不知道該說什麼，適合用低威脅問題開場。",
+                "成員們態度友善，但稍微有些害羞，等待帶領者給予清楚的引導。",
+                "有成員提到最近對未來與課業有些迷惘，其他人聽了頻頻點頭。",
+                "目前氣氛溫暖，有成員分享了生活中微小但開心的事情。",
+                "成員對團體諮商感到好奇，也展現高度參與意願。",
+                "大家情緒平穩，只是不知道該說什麼，適合用低威脅問題開場。",
             ]
             base_context = random.choice(random_contexts)
 
@@ -752,6 +782,7 @@ elif not st.session_state.current_session_id:
         st.session_state.user_name = "Leader"
         st.session_state.turn_index = 0
         st.session_state.api_blocked_until = 0
+        st.session_state.last_user_submit_at = 0
         st.session_state.exam_phase = 1
         st.session_state.phase_started_at = time.time()
         st.session_state.participants = select_participants()
@@ -788,7 +819,7 @@ else:
 
     approach = ctx.get("approach", "不指定（預設）")
     atmosphere = ctx.get("atmosphere", "")
-    display_atmosphere = atmosphere.split("【第 1 次團體逐字稿節錄】")[0].split("[特別指示")[0].strip()
+    display_atmosphere = atmosphere.split("")[0].split("[特別指示")[0].strip()
 
     continuation_display = " | 📎 已自動接續第 1 次團體" if ctx.get("has_previous_transcript") else ""
     approach_display = f" | 🧠 學派取向：{approach}" if approach != "不指定（預設）" else ""
@@ -857,9 +888,24 @@ else:
             with st.chat_message("assistant", avatar=avatar):
                 st.write(f"**{role}:** {content}")
 
+    cooldown_remaining = get_input_cooldown_remaining()
+
+    st.caption(f"每次輸入最多 {MAX_USER_INPUT_CHARS} 字；AI 回應後請間隔至少 {INPUT_COOLDOWN_SECONDS} 秒再送出下一段。")
+
+    if cooldown_remaining > 0:
+        st.info(f"請等待 {cooldown_remaining} 秒後再送出下一段。")
+
     user_input = st.chat_input("請輸入...", disabled=phase_time_is_up())
 
     if user_input:
+        is_valid, result = validate_student_input(user_input)
+
+        if not is_valid:
+            st.warning(result)
+            st.stop()
+
+        user_input = result
+
         with st.chat_message("user", avatar=st.session_state.user_avatar):
             st.write(user_input)
 
@@ -948,3 +994,5 @@ Do not mention that you are an AI unless the role setting explicitly requires it
                     error_text = f"{participant_name} 回應失敗：{e}"
                     safe_log_chat_message("System", error_text, "ai_error", "system")
                     st.warning(f"⚠️ {participant_name} 暫時無法回應：{e}")
+
+        st.session_state.last_user_submit_at = time.time()
