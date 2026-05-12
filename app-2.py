@@ -108,6 +108,7 @@ def get_input_cooldown_remaining():
     last_submit_at = st.session_state.get("last_user_submit_at", 0)
     if not last_submit_at:
         return 0
+
     elapsed = time.time() - last_submit_at
     return max(0, int(INPUT_COOLDOWN_SECONDS - elapsed))
 
@@ -281,11 +282,14 @@ def create_llm(current_key):
         "temperature": 0.4,
         "timeout": 30,
         "max_retries": 1,
+        "max_output_tokens": 512,
+        "thinking_budget": 0,
     }
 
     try:
-        return ChatGoogleGenerativeAI(**base_kwargs, max_output_tokens=220)
+        return ChatGoogleGenerativeAI(**base_kwargs)
     except TypeError:
+        base_kwargs.pop("thinking_budget", None)
         return ChatGoogleGenerativeAI(**base_kwargs)
 
 
@@ -514,6 +518,7 @@ def build_transcript(ctx):
         if msg.get("role") == "System":
             transcript += f"【系統紀錄】{msg.get('content', '')}\n\n"
             continue
+
         transcript += f"{transcript_role_label(msg.get('role', ''))}： {msg.get('content', '')}\n\n"
 
     return transcript
@@ -816,7 +821,6 @@ else:
 
     approach = ctx.get("approach", "不指定（預設）")
     atmosphere = ctx.get("atmosphere", "")
-
     display_atmosphere = ctx.get("base_context", "") or atmosphere
     display_atmosphere = display_atmosphere.split("[特別指示")[0].strip()
 
@@ -942,7 +946,9 @@ INSTRUCTION:
 Respond naturally according to your persona.
 Use Traditional Chinese.
 Use direct speech only.
-Reply in 1 to 3 short sentences.
+Reply in 1 to 2 complete short sentences.
+Every reply must be a complete sentence and end with 。！？.
+Do not stop mid-sentence. If you need to be brief, say only one complete sentence.
 Keep the response supportive and appropriate for group counseling training.
 If this is phase 2, continue naturally from phase 1 without mechanically summarizing everything.
 Do not mention that you are an AI unless the role setting explicitly requires it.
