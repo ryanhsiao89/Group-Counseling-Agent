@@ -16,6 +16,14 @@ import personas
 st.set_page_config(page_title="AI 團體諮商模擬器", page_icon="🎭", layout="wide")
 
 
+EXAM_PHASE_SECONDS = 10 * 60
+MAX_PREVIOUS_CONTEXT_CHARS = 3500
+MAX_RECENT_HISTORY_MESSAGES = 12
+API_COOLDOWN_SECONDS = 90
+MAX_USER_INPUT_CHARS = 120
+INPUT_COOLDOWN_SECONDS = 5
+
+
 WHITELIST = {
     "BB1092033": "joychen0614@gmail.com",
     "BB1102066": "bb1102066@hcu.edu.tw",
@@ -54,11 +62,15 @@ DEFAULT_SESSION_STATE = {
     "current_session_id": None,
     "participants": [],
     "user_role": "",
-    "user_avatar": "🙋",
-    "user_name": "User",
+    "user_avatar": "🧑‍🏫",
+    "user_name": "Leader",
     "group_context": None,
-    "previous_transcript_text": "",
     "turn_index": 0,
+    "api_blocked_until": 0,
+    "last_user_submit_at": 0,
+    "exam_phase": 0,
+    "phase_started_at": 0,
+    "phase_1_transcript": "",
 }
 
 
@@ -71,6 +83,54 @@ def init_session_state():
 init_session_state()
 
 
+def format_seconds(seconds):
+    seconds = max(0, int(seconds))
+    minutes = seconds // 60
+    remain = seconds % 60
+    return f"{minutes:02d}:{remain:02d}"
+
+
+def phase_elapsed_seconds():
+    if not st.session_state.phase_started_at:
+        return 0
+    return int(time.time() - st.session_state.phase_started_at)
+
+
+def phase_remaining_seconds():
+    return max(0, EXAM_PHASE_SECONDS - phase_elapsed_seconds())
+
+
+def phase_time_is_up():
+    return phase_remaining_seconds() <= 0
+
+
+def get_input_cooldown_remaining():
+    last_submit_at = st.session_state.get("last_user_submit_at", 0)
+
+    if not last_submit_at:
+        return 0
+
+    elapsed = time.time() - last_submit_at
+    return max(0, int(INPUT_COOLDOWN_SECONDS - elapsed))
+
+
+def validate_student_input(user_input):
+    text = user_input.strip()
+
+    if not text:
+        return False, "請輸入內容。"
+
+    if len(text) > MAX_USER_INPUT_CHARS:
+        return False, f"本次輸入共 {len(text)} 字，已超過 {MAX_USER_INPUT_CHARS} 字上限，請縮短後再送出。"
+
+    cooldown_remaining = get_input_cooldown_remaining()
+
+    if cooldown_remaining > 0:
+        return False, f"請等待 {cooldown_remaining} 秒後再送出下一段。"
+
+    return True, text
+
+
 def safe_start_session(student_id, user_role, group_type, session_num):
     try:
         return data_manager.start_session(student_id, user_role, group_type, session_num)
@@ -81,25 +141,17 @@ def safe_start_session(student_id, user_role, group_type, session_num):
 
 def role_to_speaker_label(role):
     if role == "user":
-        if st.session_state.user_role == "團體帶領者 (Leader)":
-            return "Student Leader"
-        return "Student Member"
-
+        return "Student Leader"
     return role
 
 
 def role_to_speaker_type(role):
     if role == "user":
-        if st.session_state.user_role == "團體帶領者 (Leader)":
-            return "student_leader"
-        return "student_member"
-
+        return "student_leader"
     if role == "System":
         return "system"
-
     if "Leader" in role:
         return "ai_leader"
-
     return "ai_member"
 
 
@@ -124,19 +176,6 @@ def safe_log_chat_message(role, content, message_type="dialogue", source="live")
         )
     except Exception as e:
         print(f"log_message failed: {e}")
-
-
-def safe_log_uploaded_transcript(session_id, student_id, session_num, filename, transcript_text):
-    try:
-        data_manager.log_uploaded_transcript(
-            session_id=session_id,
-            student_id=student_id,
-            session_num=session_num,
-            filename=filename,
-            transcript_text=transcript_text,
-        )
-    except Exception as e:
-        print(f"log_uploaded_transcript failed: {e}")
 
 
 def safe_log_transcript_snapshot(session_id, student_id, role, group_type, session_num, approach, transcript_text, reason):
@@ -182,7 +221,7 @@ def send_otp_email(receiver_email, otp):
         body = (
             "您好：\n\n"
             "歡迎參與本研究並使用「團體諮商 AI 模擬演練系統」。\n\n"
-            f"您的本次登入驗證碼為：【 {otp} 】\n\n"
+            f"您的本次登入驗證碼為：\n\n"
             "請將此驗證碼輸入系統以開始演練。\n"
             "若非您本人操作，請忽略此信件。"
         )
@@ -218,6 +257,14 @@ def is_invalid_key_error(error):
     return any(keyword in error_msg for keyword in keywords)
 
 
+def set_api_cooldown():
+    st.session_state.api_blocked_until = time.time() + API_COOLDOWN_SECONDS
+
+
+def get_api_cooldown_remaining():
+    return max(0, int(st.session_state.api_blocked_until - time.time()))
+
+
 def normalize_llm_content(response):
     content = getattr(response, "content", "")
 
@@ -230,21 +277,33 @@ def normalize_llm_content(response):
     return str(content).strip()
 
 
+def create_llm(current_key):
+    base_kwargs = {
+        "model": "gemini-2.5-flash",
+        "google_api_key": current_key,
+        "temperature": 0.4,
+        "timeout": 30,
+        "max_retries": 1,
+    }
+
+    try:
+        return ChatGoogleGenerativeAI(**base_kwargs, max_output_tokens=220)
+    except TypeError:
+        return ChatGoogleGenerativeAI(**base_kwargs)
+
+
 def generate_ai_reply(messages, show_key_switch=True):
+    cooldown_remaining = get_api_cooldown_remaining()
+    if cooldown_remaining > 0:
+        raise RuntimeError(f"Gemini 暫時達到流量限制，請約 {cooldown_remaining} 秒後再試。")
+
     last_error = None
 
     while st.session_state.current_key_index < len(st.session_state.api_keys):
         current_key = st.session_state.api_keys[st.session_state.current_key_index]
 
         try:
-            llm = ChatGoogleGenerativeAI(
-                model="gemini-2.5-flash",
-                google_api_key=current_key,
-                temperature=0.4,
-                timeout=30,
-                max_retries=1,
-            )
-
+            llm = create_llm(current_key)
             response = llm.invoke(messages)
             content = normalize_llm_content(response)
 
@@ -275,198 +334,84 @@ def generate_ai_reply(messages, show_key_switch=True):
                         )
                     continue
 
-                raise RuntimeError("所有 API Key 額度皆已用盡，請稍後再試或更換 Key。")
+                set_api_cooldown()
+                raise RuntimeError("所有 API Key 暫時達到額度或流量限制，請稍後再試。")
 
             raise RuntimeError(f"AI 生成失敗：{e}")
 
+    set_api_cooldown()
     raise RuntimeError(f"AI 生成失敗：{last_error}")
 
 
-def read_uploaded_text(uploaded_file):
-    if uploaded_file is None:
-        return ""
-
-    raw_bytes = uploaded_file.read()
-
-    for encoding in ["utf-8-sig", "utf-8", "big5", "cp950"]:
-        try:
-            return raw_bytes.decode(encoding).strip()
-        except UnicodeDecodeError:
-            continue
-
-    return raw_bytes.decode("utf-8", errors="ignore").strip()
-
-
-def normalize_role_name(role):
-    role = role.strip()
-
-    user_aliases = [
-        "User",
-        "user",
-        "使用者",
-        "學生",
-        "Leader",
-        "Member",
-        "Student Leader",
-        "Student Member",
-        "團體帶領者",
-        "團體成員",
-    ]
-
-    if role in user_aliases:
-        return "user"
-
-    return role
-
-
-def parse_transcript_to_history(transcript_text, max_messages=100):
-    if not transcript_text:
-        return []
-
-    parsed_messages = []
-    current_role = None
-    current_content = []
-
-    skip_prefixes = [
-        "【團體諮商模擬演練逐字稿】",
-        "學號：",
-        "學號:",
-        "匯出時間：",
-        "匯出時間:",
-        "學派取向：",
-        "學派取向:",
-        "是否續談：",
-        "是否續談:",
-        "續談方式：",
-        "續談方式:",
-    ]
-
-    def flush_message():
-        if current_role and current_content:
-            content = "\n".join(current_content).strip()
-            if content:
-                parsed_messages.append({
-                    "role": normalize_role_name(current_role),
-                    "content": content,
-                })
-
-    for raw_line in transcript_text.splitlines():
-        line = raw_line.strip()
-
-        if not line:
-            continue
-
-        if any(line.startswith(prefix) for prefix in skip_prefixes):
-            continue
-
-        split_index = -1
-
-        for symbol in ["：", ":"]:
-            index = line.find(symbol)
-            if 0 < index <= 40:
-                split_index = index
-                break
-
-        if split_index > 0:
-            flush_message()
-            current_role = line[:split_index].strip()
-            current_content = [line[split_index + 1:].strip()]
-        else:
-            if current_role:
-                current_content.append(line)
-
-    flush_message()
-
-    return parsed_messages[-max_messages:]
-
-
-def get_all_persona_pool(include_leader=False):
+def get_all_persona_pool():
     pool = []
 
     try:
-        if include_leader:
-            pool.append(personas.get_ai_leader())
-
         pool.extend(personas.get_special_members())
         pool.extend(personas.get_normal_members())
     except Exception:
-        pool = personas.get_mixed_participants(count=5, include_leader=include_leader)
+        pool = personas.get_mixed_participants(count=5, include_leader=False)
 
     unique = []
     seen_names = set()
 
     for participant in pool:
         name = participant.get("name")
-        if name and name not in seen_names:
+        if name and name not in seen_names and "Leader" not in name:
             unique.append(participant)
             seen_names.add(name)
 
     return unique
 
 
-def select_participants(user_role, uploaded_history):
-    include_leader = user_role == "團體成員 (Member)"
-    target_count = 4 if include_leader else 3
-    pool = get_all_persona_pool(include_leader=include_leader)
-
-    previous_names = []
-    for msg in uploaded_history:
-        role = msg.get("role", "")
-        if role and role not in ["user", "System"] and role not in previous_names:
-            previous_names.append(role)
+def select_participants():
+    pool = get_all_persona_pool()
+    random.shuffle(pool)
 
     selected = []
-    selected_names = set()
+    special = [p for p in pool if any(tag in p.get("type", "") for tag in ["情緒", "防衛", "抱怨", "逃避"])]
+    normal = [p for p in pool if p not in special]
 
-    if include_leader:
-        leader = next((p for p in pool if "Leader" in p.get("name", "")), None)
-        if leader:
-            selected.append(leader)
-            selected_names.add(leader.get("name"))
+    if special:
+        selected.append(random.choice(special))
 
-    for name in previous_names:
-        if not include_leader and "Leader" in name:
-            continue
-
-        matched = next((p for p in pool if p.get("name") == name), None)
-
-        if matched and matched.get("name") not in selected_names:
-            selected.append(matched)
-            selected_names.add(matched.get("name"))
-
-        if len(selected) >= target_count:
+    for candidate in normal + special:
+        if candidate not in selected:
+            selected.append(candidate)
+        if len(selected) >= 3:
             break
 
-    if len(selected) < target_count:
-        try:
-            mixed = personas.get_mixed_participants(count=5, include_leader=include_leader)
-        except Exception:
-            mixed = pool
+    return selected[:3]
 
-        candidate_pool = pool + mixed
-        random.shuffle(candidate_pool)
 
-        for candidate in candidate_pool:
-            name = candidate.get("name")
+def choose_next_speaker(participants, user_input):
+    if not participants:
+        return None
 
-            if not name or name in selected_names:
-                continue
+    text = user_input.lower()
 
-            if not include_leader and "Leader" in name:
-                continue
+    for participant in participants:
+        name = participant.get("name", "")
+        participant_id = participant.get("id", "")
 
-            selected.append(candidate)
-            selected_names.add(name)
+        if name and name.lower() in text:
+            return participant
 
-            if len(selected) >= target_count:
-                break
+        if participant_id and participant_id.lower() in text:
+            return participant
 
-    if include_leader:
-        leader = next((p for p in selected if "Leader" in p.get("name", "")), None)
-        others = [p for p in selected if p is not leader]
-        return ([leader] + others[:3]) if leader else selected[:target_count]
+    last_ai_roles = [
+        msg.get("role")
+        for msg in reversed(st.session_state.chat_history)
+        if msg.get("role") not in ["user", "System"]
+    ]
 
-    return selected[:target_count]
+    candidates = participants[:]
+
+    if last_ai_roles:
+        candidates = [p for p in participants if p.get("name") != last_ai_roles[0]] or participants[:]
+
+    return random.choice(candidates)
 
 
 def extract_json_object(raw_text):
@@ -492,32 +437,18 @@ def extract_json_object(raw_text):
     return {}
 
 
-def assess_leader_turn(ctx, student_intervention):
-    if st.session_state.user_role != "團體帶領者 (Leader)":
-        return
-
+def assess_full_exam(ctx, final_transcript):
     try:
-        recent_history = st.session_state.chat_history[-18:]
-        history_text = ""
-
-        for msg in recent_history:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-
-            if role == "System":
-                continue
-
-            speaker = "Student Leader" if role == "user" else role
-            history_text += f"{speaker}: {content}\n"
+        transcript_for_assessment = final_transcript[-14000:]
 
         rubric_prompt = f"""
 你是團體諮商教學評分助理。請只回傳 JSON，不要加任何說明文字。
 
-請根據以下團體脈絡與最近對話，評估「學生作為團體帶領者」剛剛這一次介入的專業度。
+請根據完整逐字稿，評估「學生作為團體帶領者」在本次考試中的整體專業度。
+本次考試包含第 1 次團體與第 2 次續談團體。
 這個評分只給教授後台參考，不會顯示給學生。
 
 團體類型：{ctx.get('type', '')}
-第幾次團體：{ctx.get('session', '')}
 學派取向：{ctx.get('approach', '')}
 
 評分向度，每項 0 到 5 分：
@@ -535,20 +466,13 @@ def assess_leader_turn(ctx, student_intervention):
   "technique_score": 0,
   "safety_score": 0,
   "structure_score": 0,
-  "feedback": "給教授看的簡短評語，指出優點與可改進處"
+  "feedback": "給教授看的整體評語，簡短指出主要優點、限制與可改進處"
 }}
 """
 
         messages = [
             SystemMessage(content=rubric_prompt),
-            HumanMessage(
-                content=(
-                    "[最近對話]\n"
-                    f"{history_text}\n\n"
-                    "[本次學生帶領者介入]\n"
-                    f"{student_intervention}"
-                )
-            ),
+            HumanMessage(content=f"[完整考試逐字稿]\n{transcript_for_assessment}"),
         ]
 
         raw_assessment = generate_ai_reply(messages, show_key_switch=False)
@@ -557,117 +481,165 @@ def assess_leader_turn(ctx, student_intervention):
         safe_log_assessment(
             session_id=st.session_state.current_session_id,
             student_id=st.session_state.student_id,
-            session_num=ctx.get("session", ""),
+            session_num="1+2",
             assessment=assessment,
             raw_assessment=raw_assessment,
-            student_intervention=student_intervention,
+            student_intervention="FULL_EXAM_ASSESSMENT",
         )
 
     except Exception as e:
         safe_log_assessment(
             session_id=st.session_state.current_session_id,
             student_id=st.session_state.student_id,
-            session_num=ctx.get("session", ""),
+            session_num="1+2",
             assessment={},
             raw_assessment=f"assessment_error: {e}",
-            student_intervention=student_intervention,
+            student_intervention="FULL_EXAM_ASSESSMENT",
         )
 
 
 def transcript_role_label(role):
     if role == "user":
-        return role_to_speaker_label(role)
-
+        return "Student Leader"
     return role
 
 
 def build_transcript(ctx):
     transcript = (
-        "【團體諮商模擬演練逐字稿】\n"
+        "\n"
         f"學號：{st.session_state.student_id}\n"
         f"匯出時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"學派取向：{ctx.get('approach', '不指定（預設）')}\n"
-        f"是否續談：{'是' if ctx.get('has_previous_transcript') else '否'}\n\n"
+        f"目前階段：第 {st.session_state.exam_phase} 次團體\n"
+        f"學派取向：{ctx.get('approach', '不指定（預設）')}\n\n"
     )
 
     for msg in st.session_state.chat_history:
         if msg.get("role") == "System":
+            transcript += f"{msg.get('content', '')}\n\n"
             continue
         transcript += f"{transcript_role_label(msg.get('role', ''))}： {msg.get('content', '')}\n\n"
 
     return transcript
 
 
+def move_to_phase_2():
+    ctx = st.session_state.group_context or {}
+    phase_1_transcript = build_transcript(ctx)
+    st.session_state.phase_1_transcript = phase_1_transcript
+
+    safe_log_transcript_snapshot(
+        session_id=st.session_state.current_session_id,
+        student_id=st.session_state.student_id,
+        role=st.session_state.user_role,
+        group_type=ctx.get("type", ""),
+        session_num=1,
+        approach=ctx.get("approach", ""),
+        transcript_text=phase_1_transcript,
+        reason="phase_1_complete",
+    )
+
+    base_context = ctx.get("base_context", "")
+    approach_prompt = ctx.get("approach_prompt", "")
+    previous_block = f"""
+
+以下是剛剛第 1 次團體的內容節錄。第 2 次團體需要自然接續前次主題、成員情緒、互動與未完成議題。
+
+{phase_1_transcript[-MAX_PREVIOUS_CONTEXT_CHARS:]}
+"""
+
+    ctx["session"] = 2
+    ctx["has_previous_transcript"] = True
+    ctx["atmosphere"] = f"{base_context}\n\n{previous_block}\n\n{approach_prompt}"
+    st.session_state.group_context = ctx
+    st.session_state.exam_phase = 2
+    st.session_state.phase_started_at = time.time()
+    st.session_state.last_user_submit_at = 0
+
+    transition_msg = "第 1 次團體已結束，系統已自動保存逐字稿並進入第 2 次續談團體。"
+    st.session_state.chat_history.append({"role": "System", "content": transition_msg})
+    safe_log_chat_message("System", transition_msg, "phase_transition", "system")
+    st.rerun()
+
+
+def finish_exam_and_logout():
+    ctx = st.session_state.group_context or {}
+    final_transcript = build_transcript(ctx)
+
+    safe_log_transcript_snapshot(
+        session_id=st.session_state.current_session_id,
+        student_id=st.session_state.student_id,
+        role=st.session_state.user_role,
+        group_type=ctx.get("type", ""),
+        session_num="1+2",
+        approach=ctx.get("approach", ""),
+        transcript_text=final_transcript,
+        reason="exam_final_submit",
+    )
+
+    assess_full_exam(ctx, final_transcript)
+
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+
+    st.rerun()
+
+
 APPROACH_PROMPTS = {
     "不指定（預設）": "",
     "「心理動力取向」精神分析取向": """
 [特別指示：這是一個「精神分析」取向的團體]
-若你是 AI 帶領者：請關注潛意識、防衛機制、移情與過去童年經驗。適時對成員的發言進行詮釋，並探索行為背後的潛意識動機。
 若你是 AI 團體成員：請偶爾展現抗拒，或將對權威/父母的情感投射到帶領者或其他成員身上。
 """,
     "「心理動力取向」阿德勒取向": """
 [特別指示：這是一個「阿德勒學派」取向的團體]
-若你是 AI 帶領者：請營造鼓勵氛圍，引導成員探索家庭星座、早期回憶、社會興趣、自卑與超越。
 若你是 AI 團體成員：請分享人際中的氣餒、自卑感，或想討好、尋求關注的生命風格。
 """,
     "「經驗與關係導向取向」存在主義取向": """
 [特別指示：這是一個「存在主義」取向的團體]
-若你是 AI 帶領者：請關注死亡、自由與責任、孤獨、無意義等終極關懷，陪伴成員面對存在焦慮。
 若你是 AI 團體成員：請表達對未來、選擇、責任或生命意義的焦慮。
 """,
     "「經驗與關係導向取向」個人中心取向": """
 [特別指示：這是一個「個人中心治療」取向的團體]
-若你是 AI 帶領者：請展現真誠一致、無條件正向關懷與同理心，不主動說教。
 若你是 AI 團體成員：請表達內在感受、理想我與真實我的矛盾。
 """,
     "「經驗與關係導向取向」完形治療": """
 [特別指示：這是一個「完形治療」取向的團體]
-若你是 AI 帶領者：請關注此時此地、第一人稱語言、身體感受與未竟事宜。
 若你是 AI 團體成員：請多用第一人稱表達當下情緒與身體感受。
 """,
     "「經驗與關係導向取向」心理劇": """
 [特別指示：這是一個「心理劇」取向的團體]
-若你是 AI 帶領者：請像導演般引導角色扮演、替身、鏡照與角色交換。
 若你是 AI 團體成員：請願意配合演出並表達真實情感。
 """,
     "「認知行為取向」行為治療法": """
 [特別指示：這是一個「行為治療」取向的團體]
-若你是 AI 帶領者：請關注具體行為、明確目標、增強、楷模學習、行為演練與家庭作業。
 若你是 AI 團體成員：請具體描述想改變的問題行為。
 """,
     "「認知行為取向」認知治療法": """
 [特別指示：這是一個「Beck 認知治療」取向的團體]
-若你是 AI 帶領者：請協助指認自動化思考與認知扭曲，使用蘇格拉底式提問。
 若你是 AI 團體成員：請自然展現負向認知與悲觀想法。
 """,
     "「認知行為取向」理情行為治療": """
 [特別指示：這是一個「Ellis 理情行為治療 (REBT)」取向的團體]
-若你是 AI 帶領者：請運用 ABCDE 模式辨識並駁斥非理性信念。
 若你是 AI 團體成員：請使用我必須、他應該、糟透了等僵化語氣。
 """,
     "「認知行為取向」現實治療": """
 [特別指示：這是一個「現實治療」取向的團體]
-若你是 AI 帶領者：請聚焦現在行為，運用 WDEP 協助成員為選擇負責。
 若你是 AI 團體成員：請抱怨外界或他人，等待帶領者拉回自己的選擇。
 """,
     "「後現代取向」焦點解決短期治療": """
 [特別指示：這是一個「焦點解決短期治療」取向的團體]
-若你是 AI 帶領者：請尋找例外經驗，使用奇蹟問句、量尺問句、應對問句與賦能。
 若你是 AI 團體成員：請從抱怨問題逐漸轉向成功經驗與可行下一步。
 """,
     "「後現代取向」敘事治療": """
 [特別指示：這是一個「敘事治療」取向的團體]
-若你是 AI 帶領者：請運用問題外部化、獨特結果與重寫故事。
 若你是 AI 團體成員：請把困擾視為一個外在問題並探索抵抗經驗。
 """,
     "「後現代取向」女性主義治療": """
 [特別指示：這是一個「女性主義治療」取向的團體]
-若你是 AI 帶領者：請重視權力分析、性別角色社會化、平等關係與增能。
 若你是 AI 團體成員：請分享家庭、職場或社會期待中的壓迫與角色衝突。
 """,
     "「後現代取向」正向心理治療": """
 [特別指示：這是一個「正向心理治療」取向的團體]
-若你是 AI 帶領者：請引導成員探索優勢、感恩、品味美好經驗與 PERMA。
 若你是 AI 團體成員：請分享生活中微小美好、成功經驗或個人優勢。
 """,
 }
@@ -675,7 +647,7 @@ APPROACH_PROMPTS = {
 
 with st.sidebar:
     st.markdown("### ℹ️ 說明")
-    st.info("本系統對話紀錄與後台評分將存入雲端資料庫，供教學與研究分析使用。")
+    st.info("本系統採考試模式：第 1 次團體 10 分鐘，第 2 次續談團體 10 分鐘。")
     st.caption("學生端不會顯示 AI 評分；評分僅供教授後台參考。")
 
 
@@ -715,7 +687,7 @@ if not st.session_state.otp_verified:
     if st.session_state.generated_otp:
         user_otp = st.text_input("請輸入您信箱收到的 6 位數驗證碼：", type="password")
 
-        if st.button("🚀 驗證並前往劇本設定"):
+        if st.button("🚀 驗證並前往考試設定"):
             if user_otp.strip() == st.session_state.generated_otp:
                 st.session_state.otp_verified = True
                 st.rerun()
@@ -724,8 +696,10 @@ if not st.session_state.otp_verified:
 
 
 elif not st.session_state.current_session_id:
-    st.title("🎭 團體諮商模擬系統")
-    st.markdown(f"##### 👤 歡迎，**{st.session_state.student_id}**！請完成演練設定")
+    st.title("🎭 團體諮商模擬考試")
+    st.markdown(f"##### 👤 歡迎，**{st.session_state.student_id}**")
+
+    st.info("本考試固定為「團體帶領者」模式。系統會自動進行第 1 次團體與第 2 次續談團體。")
 
     col1, col2 = st.columns(2)
 
@@ -737,13 +711,8 @@ elif not st.session_state.current_session_id:
             placeholder="例如：AIzaSy..., AIzaSy...",
         )
 
-        user_role = st.radio(
-            "👉 您的角色",
-            ["團體帶領者 (Leader)", "團體成員 (Member)"],
-        )
-
     with col2:
-        st.markdown("### ⚙️ 劇本設定")
+        st.markdown("### ⚙️ 考試設定")
 
         group_type_options = [
             "大學生生涯探索團體",
@@ -764,7 +733,6 @@ elif not st.session_state.current_session_id:
             final_group_type = selected_type
 
         selected_approach = st.selectbox("🧠 理論學派取向（可選）", list(APPROACH_PROMPTS.keys()))
-        session_num = st.slider("現在是第幾次團體？", 1, 10, 1)
 
         context_input = st.text_area(
             "本次前情提要 / 團體氣氛（可選）",
@@ -772,32 +740,7 @@ elif not st.session_state.current_session_id:
             placeholder="若留白，系統會自動產生溫和安全的團體情境。",
         )
 
-    st.markdown("---")
-    st.markdown("### 📎 前次晤談逐字稿")
-    st.caption("第 2 次以上晤談必須上傳前次下載的逐字稿，系統會直接載入聊天室並接續晤談。")
-
-    uploaded_transcript = st.file_uploader(
-        "上傳前次晤談逐字稿 .txt",
-        type=["txt"],
-    )
-
-    previous_transcript_text = ""
-    uploaded_history = []
-
-    if uploaded_transcript is not None:
-        previous_transcript_text = read_uploaded_text(uploaded_transcript)
-        uploaded_history = parse_transcript_to_history(previous_transcript_text)
-
-        if previous_transcript_text and uploaded_history:
-            st.success(f"✅ 已讀取前次逐字稿，並解析出 {len(uploaded_history)} 則對話。")
-            with st.expander("預覽前次逐字稿"):
-                st.text(previous_transcript_text[:3000])
-        elif previous_transcript_text:
-            st.warning("⚠️ 已讀取檔案，但無法解析成可接續的對話。請使用本系統下載的逐字稿。")
-        else:
-            st.warning("⚠️ 上傳檔案內容為空。")
-
-    if st.button("開始演練", type="primary"):
+    if st.button("開始考試：第 1 次團體", type="primary"):
         parsed_keys = [key.strip() for key in api_key_input.replace("，", ",").split(",") if key.strip()]
 
         if not parsed_keys:
@@ -808,103 +751,51 @@ elif not st.session_state.current_session_id:
             st.warning("請確認團體類型或自訂團體名稱。")
             st.stop()
 
-        if session_num > 1 and not previous_transcript_text:
-            st.warning("第 2 次以上晤談請先上傳前次逐字稿，才能接續團體歷程。")
-            st.stop()
-
-        if previous_transcript_text and not uploaded_history:
-            st.warning("前次逐字稿無法解析，請確認是由本系統下載的 .txt 檔。")
-            st.stop()
-
-        st.session_state.api_keys = parsed_keys
-        st.session_state.current_key_index = 0
-        st.session_state.previous_transcript_text = previous_transcript_text
-        st.session_state.turn_index = 0
-
         if context_input.strip():
             base_context = context_input.strip()
         else:
             random_contexts = [
-                "【溫和破冰】成員們態度友善，但稍微有些害羞，等待帶領者給予清楚的引導。",
-                "【建立共鳴】有成員提到最近對未來與課業有些迷惘，其他人聽了頻頻點頭。",
-                "【正向支持】目前氣氛溫暖，有成員分享了生活中微小但開心的事情。",
-                "【目標探索】成員對團體諮商感到好奇，也展現高度參與意願。",
-                "【溫和沉默】大家情緒平穩，只是不知道該說什麼，適合用低威脅問題開場。",
+                "成員們態度友善，但稍微有些害羞，等待帶領者給予清楚的引導。",
+                "有成員提到最近對未來與課業有些迷惘，其他人聽了頻頻點頭。",
+                "目前氣氛溫暖，有成員分享了生活中微小但開心的事情。",
+                "成員對團體諮商感到好奇，也展現高度參與意願。",
+                "大家情緒平穩，只是不知道該說什麼，適合用低威脅問題開場。",
             ]
             base_context = random.choice(random_contexts)
 
-        previous_context_block = ""
-        if previous_transcript_text:
-            previous_context_block = f"""
-【前次晤談逐字稿】
-以下是學生上傳的前次團體晤談紀錄。請把它視為已發生的團體歷程，本次要自然接續前次的主題、情緒、互動與未完成議題。
+        approach_prompt = APPROACH_PROMPTS[selected_approach]
+        final_context = f"{base_context}\n\n{approach_prompt}"
 
-{previous_transcript_text[-8000:]}
-"""
-
-        final_context = f"""
-{base_context}
-
-{previous_context_block}
-
-{APPROACH_PROMPTS[selected_approach]}
-"""
-
+        user_role = "團體帶領者 (Leader)"
         session_id = safe_start_session(
             st.session_state.student_id,
             user_role,
             final_group_type,
-            session_num,
+            "1+2 Exam",
         )
 
+        st.session_state.api_keys = parsed_keys
+        st.session_state.current_key_index = 0
         st.session_state.current_session_id = session_id
         st.session_state.user_role = user_role
+        st.session_state.user_avatar = "🧑‍🏫"
+        st.session_state.user_name = "Leader"
+        st.session_state.turn_index = 0
+        st.session_state.api_blocked_until = 0
+        st.session_state.last_user_submit_at = 0
+        st.session_state.exam_phase = 1
+        st.session_state.phase_started_at = time.time()
+        st.session_state.participants = select_participants()
+        st.session_state.chat_history = []
         st.session_state.group_context = {
             "type": final_group_type,
-            "session": session_num,
+            "session": 1,
             "atmosphere": final_context,
+            "base_context": base_context,
             "approach": selected_approach,
-            "has_previous_transcript": bool(previous_transcript_text),
+            "approach_prompt": approach_prompt,
+            "has_previous_transcript": False,
         }
-
-        st.session_state.participants = select_participants(user_role, uploaded_history)
-
-        if user_role == "團體帶領者 (Leader)":
-            st.session_state.user_avatar = "🧑‍🏫"
-            st.session_state.user_name = "Leader"
-        else:
-            st.session_state.user_avatar = "🙋"
-            st.session_state.user_name = "Member"
-
-        if previous_transcript_text:
-            st.session_state.chat_history = uploaded_history
-
-            safe_log_uploaded_transcript(
-                session_id=session_id,
-                student_id=st.session_state.student_id,
-                session_num=session_num,
-                filename=uploaded_transcript.name,
-                transcript_text=previous_transcript_text,
-            )
-
-            for imported_msg in uploaded_history:
-                safe_log_chat_message(
-                    role=imported_msg.get("role", ""),
-                    content=imported_msg.get("content", ""),
-                    message_type="imported_transcript",
-                    source="uploaded_previous_transcript",
-                )
-
-        else:
-            if user_role == "團體成員 (Member)":
-                welcome_msg = (
-                    f"大家好，歡迎大家來到這次的「{final_group_type}」。"
-                    f"今天是我們的第 {session_num} 次聚會，有人想先分享一下最近的心情嗎？"
-                )
-                st.session_state.chat_history = [{"role": "Dr. AI (Leader)", "content": welcome_msg}]
-                safe_log_chat_message("Dr. AI (Leader)", welcome_msg, "ai_response", "live")
-            else:
-                st.session_state.chat_history = []
 
         st.rerun()
 
@@ -912,20 +803,31 @@ elif not st.session_state.current_session_id:
 else:
     ctx = st.session_state.group_context or {}
     participants = st.session_state.participants or []
+    current_phase = st.session_state.exam_phase
 
-    st.subheader(f"💬 {ctx.get('type', '團體諮商模擬')}（第 {ctx.get('session', 1)} 次）")
+    st.subheader(f"💬 {ctx.get('type', '團體諮商模擬')}（第 {current_phase} 次團體）")
+
+    remaining = phase_remaining_seconds()
+    elapsed = phase_elapsed_seconds()
+    progress_value = min(1.0, elapsed / EXAM_PHASE_SECONDS)
+
+    st.progress(progress_value)
+    st.caption(f"本階段時間：已進行 {format_seconds(elapsed)} / 剩餘 {format_seconds(remaining)}")
+
+    if phase_time_is_up():
+        st.warning("⏰ 本階段 10 分鐘已到，請使用側邊欄按鈕進入下一步。")
 
     approach = ctx.get("approach", "不指定（預設）")
     atmosphere = ctx.get("atmosphere", "")
-    display_atmosphere = atmosphere.split("【前次晤談逐字稿】")[0].split("[特別指示")[0].strip()
+    display_atmosphere = atmosphere.split("")[0].split("[特別指示")[0].strip()
 
-    continuation_display = " | 📎 已載入前次逐字稿" if ctx.get("has_previous_transcript") else ""
+    continuation_display = " | 📎 已自動接續第 1 次團體" if ctx.get("has_previous_transcript") else ""
     approach_display = f" | 🧠 學派取向：{approach}" if approach != "不指定（預設）" else ""
 
     st.success(f"🎬 **當前情境設定：** {display_atmosphere}{approach_display}{continuation_display}")
 
     if not participants:
-        st.error("⚠️ 找不到 AI 參與者資料，請登出後重新開始演練。")
+        st.error("⚠️ 找不到 AI 參與者資料，請重新開始。")
         st.stop()
 
     cols = st.columns(len(participants))
@@ -939,45 +841,41 @@ else:
 
     with st.sidebar:
         st.markdown("---")
-        st.markdown("### 📝 演練結束區")
+        st.markdown("### 📝 考試控制區")
+        st.metric("目前階段", f"第 {current_phase} 次團體")
+        st.metric("剩餘時間", format_seconds(remaining))
 
         transcript = build_transcript(ctx)
 
         st.download_button(
-            label="📥 1. 先下載本次逐字稿",
+            label="📥 下載目前逐字稿備份",
             data=transcript.encode("utf-8-sig"),
-            file_name=f"GroupLog_{st.session_state.student_id}_{datetime.now().strftime('%m%d_%H%M')}.txt",
+            file_name=f"GroupExam_{st.session_state.student_id}_{datetime.now().strftime('%m%d_%H%M')}.txt",
             mime="text/plain",
             use_container_width=True,
-            type="primary",
         )
 
-        st.warning("⚠️ 離開前請務必確認已下載逐字稿。")
+        if current_phase == 1:
+            if st.button("➡️ 進入第 2 次團體", use_container_width=True, disabled=not phase_time_is_up()):
+                move_to_phase_2()
 
-        if st.button("🚪 2. 結束並登出系統", use_container_width=True):
-            final_transcript = build_transcript(ctx)
+            if not phase_time_is_up():
+                st.caption("第 1 次團體滿 10 分鐘後，才能進入第 2 次。")
 
-            safe_log_transcript_snapshot(
-                session_id=st.session_state.current_session_id,
-                student_id=st.session_state.student_id,
-                role=st.session_state.user_role,
-                group_type=ctx.get("type", ""),
-                session_num=ctx.get("session", ""),
-                approach=ctx.get("approach", ""),
-                transcript_text=final_transcript,
-                reason="logout",
-            )
+        elif current_phase == 2:
+            if st.button("✅ 結束並送出考試", use_container_width=True, disabled=not phase_time_is_up(), type="primary"):
+                with st.spinner("正在保存逐字稿並送出後台評分..."):
+                    finish_exam_and_logout()
 
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
-
-            st.rerun()
+            if not phase_time_is_up():
+                st.caption("第 2 次團體滿 10 分鐘後，才能送出。")
 
     for msg in st.session_state.chat_history:
         role = msg.get("role", "")
         content = msg.get("content", "")
 
         if role == "System":
+            st.caption(f"系統：{content}")
             continue
 
         if role == "user":
@@ -990,9 +888,24 @@ else:
             with st.chat_message("assistant", avatar=avatar):
                 st.write(f"**{role}:** {content}")
 
-    user_input = st.chat_input("請輸入...")
+    cooldown_remaining = get_input_cooldown_remaining()
+
+    st.caption(f"每次輸入最多 {MAX_USER_INPUT_CHARS} 字；AI 回應後請間隔至少 {INPUT_COOLDOWN_SECONDS} 秒再送出下一段。")
+
+    if cooldown_remaining > 0:
+        st.info(f"請等待 {cooldown_remaining} 秒後再送出下一段。")
+
+    user_input = st.chat_input("請輸入...", disabled=phase_time_is_up())
 
     if user_input:
+        is_valid, result = validate_student_input(user_input)
+
+        if not is_valid:
+            st.warning(result)
+            st.stop()
+
+        user_input = result
+
         with st.chat_message("user", avatar=st.session_state.user_avatar):
             st.write(user_input)
 
@@ -1003,24 +916,9 @@ else:
 
         safe_log_chat_message("user", user_input, "student_message", "live")
 
-        active_speakers = []
+        participant = choose_next_speaker(participants, user_input)
 
-        for participant in participants:
-            participant_name = participant.get("name", "")
-
-            if "Leader" in participant_name:
-                if random.random() < 0.80:
-                    active_speakers.append(participant)
-            else:
-                if random.random() < 0.40:
-                    active_speakers.append(participant)
-
-        if not active_speakers:
-            active_speakers = [random.choice(participants)]
-
-        random.shuffle(active_speakers)
-
-        for participant in active_speakers:
+        if participant is not None:
             participant_name = participant.get("name", "AI")
             participant_avatar = participant.get("avatar", "🤖")
             participant_prompt = participant.get("system_prompt", "")
@@ -1031,6 +929,7 @@ else:
 [DYNAMIC CONTEXT]
 Group Type: {ctx.get('type', '')}
 Session Number: {ctx.get('session', '')}
+Exam Phase: {current_phase}
 Atmosphere and Previous Session:
 {ctx.get('atmosphere', '')}
 
@@ -1044,12 +943,13 @@ INSTRUCTION:
 Respond naturally according to your persona.
 Use Traditional Chinese.
 Use direct speech only.
-Keep the response concise, supportive, and appropriate for a group counseling training simulation.
-If previous transcript exists, continue naturally from prior themes without mechanically summarizing everything.
+Reply in 1 to 3 short sentences.
+Keep the response supportive and appropriate for group counseling training.
+If this is phase 2, continue naturally from phase 1 without mechanically summarizing everything.
 Do not mention that you are an AI unless the role setting explicitly requires it.
 """
 
-                    recent_history = st.session_state.chat_history[-24:]
+                    recent_history = st.session_state.chat_history[-MAX_RECENT_HISTORY_MESSAGES:]
                     history_text = ""
 
                     for history_msg in recent_history:
@@ -1060,7 +960,7 @@ Do not mention that you are an AI unless the role setting explicitly requires it
                             continue
 
                         if role == "user":
-                            history_text += f"Student: {content}\n"
+                            history_text += f"Student Leader: {content}\n"
                         else:
                             prefix = "You" if role == participant_name else role
                             history_text += f"{prefix}: {content}\n"
@@ -1090,12 +990,9 @@ Do not mention that you are an AI unless the role setting explicitly requires it
 
                     safe_log_chat_message(participant_name, content, "ai_response", "live")
 
-                    time.sleep(1.2)
-
                 except Exception as e:
                     error_text = f"{participant_name} 回應失敗：{e}"
                     safe_log_chat_message("System", error_text, "ai_error", "system")
                     st.warning(f"⚠️ {participant_name} 暫時無法回應：{e}")
-                    continue
 
-        assess_leader_turn(ctx, user_input)
+        st.session_state.last_user_submit_at = time.time()
