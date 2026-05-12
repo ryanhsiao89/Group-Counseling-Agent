@@ -106,10 +106,8 @@ def phase_time_is_up():
 
 def get_input_cooldown_remaining():
     last_submit_at = st.session_state.get("last_user_submit_at", 0)
-
     if not last_submit_at:
         return 0
-
     elapsed = time.time() - last_submit_at
     return max(0, int(INPUT_COOLDOWN_SECONDS - elapsed))
 
@@ -124,7 +122,6 @@ def validate_student_input(user_input):
         return False, f"本次輸入共 {len(text)} 字，已超過 {MAX_USER_INPUT_CHARS} 字上限，請縮短後再送出。"
 
     cooldown_remaining = get_input_cooldown_remaining()
-
     if cooldown_remaining > 0:
         return False, f"請等待 {cooldown_remaining} 秒後再送出下一段。"
 
@@ -243,7 +240,6 @@ def send_otp_email(receiver_email, otp):
     except Exception as e:
         st.error(f"❌ 驗證信寄送失敗：{e}")
         return False
-
 
 
 def is_quota_error(error):
@@ -507,7 +503,7 @@ def transcript_role_label(role):
 
 def build_transcript(ctx):
     transcript = (
-        "\n"
+        "【團體諮商模擬演練逐字稿】\n"
         f"學號：{st.session_state.student_id}\n"
         f"匯出時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"目前階段：第 {st.session_state.exam_phase} 次團體\n"
@@ -516,7 +512,7 @@ def build_transcript(ctx):
 
     for msg in st.session_state.chat_history:
         if msg.get("role") == "System":
-            transcript += f"{msg.get('content', '')}\n\n"
+            transcript += f"【系統紀錄】{msg.get('content', '')}\n\n"
             continue
         transcript += f"{transcript_role_label(msg.get('role', ''))}： {msg.get('content', '')}\n\n"
 
@@ -542,7 +538,7 @@ def move_to_phase_2():
     base_context = ctx.get("base_context", "")
     approach_prompt = ctx.get("approach_prompt", "")
     previous_block = f"""
-
+【第 1 次團體逐字稿節錄】
 以下是剛剛第 1 次團體的內容節錄。第 2 次團體需要自然接續前次主題、成員情緒、互動與未完成議題。
 
 {phase_1_transcript[-MAX_PREVIOUS_CONTEXT_CHARS:]}
@@ -820,7 +816,9 @@ else:
 
     approach = ctx.get("approach", "不指定（預設）")
     atmosphere = ctx.get("atmosphere", "")
-    display_atmosphere = atmosphere.split("")[0].split("[特別指示")[0].strip()
+
+    display_atmosphere = ctx.get("base_context", "") or atmosphere
+    display_atmosphere = display_atmosphere.split("[特別指示")[0].strip()
 
     continuation_display = " | 📎 已自動接續第 1 次團體" if ctx.get("has_previous_transcript") else ""
     approach_display = f" | 🧠 學派取向：{approach}" if approach != "不指定（預設）" else ""
